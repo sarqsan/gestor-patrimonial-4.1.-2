@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Property, RentPayment } from "../types";
+import { Property, RentPayment, getPropertyTenantsForYear, getTenantActiveMonthsForYear } from "../types";
 import { 
   Building, 
   Calendar, 
@@ -12,7 +12,10 @@ import {
   X, 
   FileText,
   BadgeAlert,
-  DownloadCloud
+  DownloadCloud,
+  UserCheck,
+  UserX,
+  History
 } from "lucide-react";
 
 interface RentControlProps {
@@ -44,7 +47,14 @@ export default function RentControl({
     return pay ? pay.status : 'pending';
   };
 
-  const handleOpenReceipt = (propId: string, month: string, year: number) => {
+  const handleOpenReceipt = (
+    propId: string, 
+    month: string, 
+    year: number,
+    tenantNameOverride?: string,
+    tenantDniOverride?: string,
+    amountOverride?: number
+  ) => {
     const prop = properties.find(p => p.id === propId);
     if (!prop) return;
 
@@ -55,10 +65,10 @@ export default function RentControl({
       receiptNo,
       address: prop.address,
       cadastral: prop.cadastralReference,
-      tenant: prop.tenantName,
-      tenantDni: prop.tenantDni,
+      tenant: tenantNameOverride || prop.tenantName,
+      tenantDni: tenantDniOverride || prop.tenantDni,
       ownerName: prop.owner === 'user1' ? user1Name : prop.owner === 'user2' ? "Cónyuge" : `${user1Name} y Cónyuge`,
-      amount: prop.monthlyRent,
+      amount: amountOverride !== undefined ? amountOverride : prop.monthlyRent,
       month,
       year,
       status,
@@ -80,96 +90,185 @@ export default function RentControl({
     <div id="rent-control-root" className="space-y-8 animate-fade-in text-slate-100">
       
       {/* HEADER SECTION */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-800 pb-5">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-800 pb-5 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Control de Cobros e Inquilinos</h1>
           <p className="text-sm text-slate-400 mt-1">
-            Matriz de seguimiento de mensualidades, estado de cobros y emisión instantánea de recibos/facturas.
+            Matriz de seguimiento de mensualidades, desglose por cambio de inquilino y emisión de recibos.
           </p>
+        </div>
+
+        {/* YEAR SELECTOR */}
+        <div className="flex items-center space-x-2 bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-1.5 shadow-md">
+          <Calendar className="w-4 h-4 text-indigo-400" />
+          <span className="text-xs font-semibold text-slate-300">Ejercicio Fiscal:</span>
+          <select
+            value={selectedYear}
+            onChange={(e) => setSelectedYear(Number(e.target.value))}
+            className="bg-slate-800 border border-indigo-500/30 text-indigo-300 font-bold rounded-lg px-2.5 py-1 text-xs focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+          >
+            {[2024, 2025, 2026, 2027, 2028].map((yr) => (
+              <option key={yr} value={yr}>Año {yr}</option>
+            ))}
+          </select>
         </div>
       </div>
 
       {/* RENT PAYMENT LEDGER MATRIX */}
       <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 overflow-x-auto shadow-lg space-y-4">
-        <h3 className="text-md font-bold text-white flex items-center">
-          <Calendar className="w-4.5 h-4.5 text-indigo-400 mr-2" />
-          Calendario de Pagos de Alquiler (Año Fiscal {selectedYear})
-        </h3>
-        <p className="text-xs text-slate-400">
-          Haz clic en las celdas de mes para alternar el estado del pago o emitir un recibo formal para el inquilino.
-        </p>
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <div>
+            <h3 className="text-md font-bold text-white flex items-center">
+              <Calendar className="w-4.5 h-4.5 text-indigo-400 mr-2" />
+              Calendario de Pagos y Mensualidades (Ejercicio {selectedYear})
+            </h3>
+            <p className="text-xs text-slate-400">
+              En ejercicios con cambio de inquilino se desglosan ambos arrendatarios según su período de vigencia.
+            </p>
+          </div>
+          
+          <div className="flex items-center gap-2 text-[10px] font-mono">
+            <span className="px-2 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md flex items-center gap-1">
+              <UserCheck className="w-3 h-3" /> Contrato Vigente
+            </span>
+            <span className="px-2 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-md flex items-center gap-1">
+              <History className="w-3 h-3" /> Cambio de Inquilino
+            </span>
+          </div>
+        </div>
 
         {properties.length > 0 ? (
           <div className="overflow-x-auto max-w-full">
             <table className="w-full text-left border-collapse mt-4 text-xs font-sans min-w-[1000px]">
               <thead>
-              <tr className="border-b border-slate-700/60 text-slate-400 font-mono text-[10px] uppercase tracking-wider">
-                <th className="py-3 px-2">Inmueble / Inquilino</th>
-                <th className="py-3 px-2 text-right">Renta</th>
-                {MONTHS.map((m) => (
-                  <th key={m} className="py-3 px-1.5 text-center">{m.substring(0, 3)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {properties.map((prop) => (
-                <tr key={prop.id} className="hover:bg-slate-800/20 transition-all">
-                  <td className="py-3.5 px-2">
-                    <div className="font-semibold text-white truncate max-w-[180px]">{prop.address}</div>
-                    <div className="text-[10px] text-slate-400 truncate max-w-[180px]">{prop.tenantName || "Sin Inquilino"}</div>
-                  </td>
-                  <td className="py-3.5 px-2 text-right font-bold text-slate-200">
-                    {prop.monthlyRent} €
-                  </td>
-                  {MONTHS.map((m) => {
-                    const status = getPaymentStatus(prop.id, m, selectedYear);
-                    return (
-                      <td key={m} className="py-3.5 px-1.5 text-center">
-                        <div className="flex flex-col items-center space-y-1">
-                          {/* Circle click for changing */}
-                          <button
-                            onClick={() => {
-                              const nextStatusMap: Record<'paid' | 'pending' | 'late', 'paid' | 'pending' | 'late'> = {
-                                'pending': 'paid',
-                                'paid': 'late',
-                                'late': 'pending'
-                              };
-                              onUpdatePaymentStatus(prop.id, m, selectedYear, nextStatusMap[status]);
-                            }}
-                            className={`w-6 h-6 rounded-lg flex items-center justify-center transition-all border cursor-pointer hover:scale-110 ${
-                              status === 'paid'
-                                ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
-                                : status === 'late'
-                                ? "bg-red-500/20 text-red-400 border-red-500/40 animate-pulse"
-                                : "bg-slate-900/60 text-slate-500 border-slate-700/60 hover:border-slate-500"
-                            }`}
-                            title={`Cambiar estado (${status === 'paid' ? 'Pagado' : status === 'late' ? 'Demorado' : 'Pendiente'})`}
-                          >
-                            {status === 'paid' ? (
-                              <CheckCircle className="w-3.5 h-3.5" />
-                            ) : status === 'late' ? (
-                              <BadgeAlert className="w-3.5 h-3.5" />
-                            ) : (
-                              <Clock className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                          
-                          {/* Receipt button */}
-                          <button
-                            onClick={() => handleOpenReceipt(prop.id, m, selectedYear)}
-                            className="text-[9px] text-slate-400 hover:text-indigo-400 font-mono font-semibold"
-                          >
-                            Recibo
-                          </button>
-                        </div>
-                      </td>
-                    );
-                  })}
+                <tr className="border-b border-slate-700/60 text-slate-400 font-mono text-[10px] uppercase tracking-wider">
+                  <th className="py-3 px-2">Inmueble / Inquilino</th>
+                  <th className="py-3 px-2 text-right">Renta (€/mes)</th>
+                  {MONTHS.map((m) => (
+                    <th key={m} className="py-3 px-1.5 text-center">{m.substring(0, 3)}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {properties.map((prop) => {
+                  const tenantRecords = getPropertyTenantsForYear(prop, selectedYear);
+                  const isTransitionYear = tenantRecords.length > 1;
+
+                  return tenantRecords.map((tenantRec, idx) => {
+                    const activeMonthIndices = getTenantActiveMonthsForYear(tenantRec, selectedYear);
+                    const isEnded = !!tenantRec.endDate && tenantRec.endDate.startsWith(selectedYear.toString());
+                    const isNew = tenantRec.startDate.startsWith(selectedYear.toString());
+
+                    return (
+                      <tr 
+                        key={`${prop.id}_tenant_${tenantRec.id || idx}`} 
+                        className={`transition-all ${isTransitionYear ? "bg-slate-900/40 hover:bg-slate-800/30" : "hover:bg-slate-800/20"}`}
+                      >
+                        <td className="py-3.5 px-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-white truncate max-w-[200px]" title={prop.address}>
+                              {prop.address.split(",")[0]}
+                            </span>
+                            {isTransitionYear && (
+                              <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded font-mono font-bold">
+                                {isEnded ? "Saliente" : isNew ? "Nuevo Inquilino" : "Transición"}
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="text-[11px] font-bold text-indigo-300 mt-0.5 flex items-center gap-1.5">
+                            <span>Inquilino: {tenantRec.tenantName || "Sin Inquilino"}</span>
+                            {tenantRec.tenantDni && (
+                              <span className="text-[9px] text-slate-500 font-mono">({tenantRec.tenantDni})</span>
+                            )}
+                          </div>
+
+                          <div className="text-[9px] text-slate-500 font-mono mt-0.5">
+                            Contrato: {tenantRec.startDate ? tenantRec.startDate.split("-").reverse().join("/") : "Inicial"} 
+                            {tenantRec.endDate ? ` ➔ ${tenantRec.endDate.split("-").reverse().join("/")}` : " (Vigente)"}
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-2 text-right font-bold text-slate-200">
+                          {tenantRec.monthlyRent ? tenantRec.monthlyRent.toLocaleString("es-ES") : "0"} €
+                        </td>
+
+                        {MONTHS.map((m, monthIdx) => {
+                          const isActiveInMonth = activeMonthIndices.includes(monthIdx);
+                          const status = getPaymentStatus(prop.id, m, selectedYear);
+
+                          if (!isActiveInMonth) {
+                            return (
+                              <td key={m} className="py-3.5 px-1.5 text-center">
+                                <div className="flex flex-col items-center justify-center">
+                                  <span 
+                                    className="w-6 h-6 rounded-lg bg-slate-950/40 border border-slate-800/60 text-slate-600 flex items-center justify-center text-[10px] font-mono cursor-not-allowed"
+                                    title={tenantRec.endDate && monthIdx > MONTHS.indexOf(MONTHS[activeMonthIndices[activeMonthIndices.length - 1] || 0]) ? "Contrato finalizado" : "Sin contrato en este período"}
+                                  >
+                                    -
+                                  </span>
+                                  <span className="text-[8px] text-slate-600 font-mono mt-0.5">N/V</span>
+                                </div>
+                              </td>
+                            );
+                          }
+
+                          return (
+                            <td key={m} className="py-3.5 px-1.5 text-center">
+                              <div className="flex flex-col items-center space-y-1">
+                                {/* Circle click for changing payment status */}
+                                <button
+                                  onClick={() => {
+                                    const nextStatusMap: Record<'paid' | 'pending' | 'late', 'paid' | 'pending' | 'late'> = {
+                                      'pending': 'paid',
+                                      'paid': 'late',
+                                      'late': 'pending'
+                                    };
+                                    onUpdatePaymentStatus(prop.id, m, selectedYear, nextStatusMap[status]);
+                                  }}
+                                  className={`w-6 h-6 rounded-lg flex items-center justify-center transition-all border cursor-pointer hover:scale-110 ${
+                                    status === 'paid'
+                                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                                      : status === 'late'
+                                      ? "bg-red-500/20 text-red-400 border-red-500/40 animate-pulse"
+                                      : "bg-slate-900/60 text-slate-500 border-slate-700/60 hover:border-slate-500"
+                                  }`}
+                                  title={`Cambiar estado (${status === 'paid' ? 'Pagado' : status === 'late' ? 'Demorado' : 'Pendiente'})`}
+                                >
+                                  {status === 'paid' ? (
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                  ) : status === 'late' ? (
+                                    <BadgeAlert className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <Clock className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                                
+                                {/* Receipt button */}
+                                <button
+                                  onClick={() => handleOpenReceipt(
+                                    prop.id, 
+                                    m, 
+                                    selectedYear, 
+                                    tenantRec.tenantName, 
+                                    tenantRec.tenantDni, 
+                                    tenantRec.monthlyRent
+                                  )}
+                                  className="text-[9px] text-slate-400 hover:text-indigo-400 font-mono font-semibold cursor-pointer"
+                                >
+                                  Recibo
+                                </button>
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  });
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="text-center text-slate-500 py-12">
             No tienes inmuebles registrados en la cartera. No se pueden gestionar cobros.

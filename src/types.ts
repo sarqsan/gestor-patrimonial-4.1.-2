@@ -23,6 +23,18 @@ export interface PropertyContract {
   pdfSize?: string;
 }
 
+export interface TenantContractRecord {
+  id: string;
+  tenantName: string;
+  tenantDni: string;
+  startDate: string; // YYYY-MM-DD
+  endDate?: string;  // YYYY-MM-DD
+  monthlyRent: number;
+  pdfName?: string;
+  pdfSize?: string;
+  notes?: string;
+}
+
 export interface PropertyYearlyFinancials {
   currentValue?: number; // valor actual
   purchasePrice?: number; // valor de compra
@@ -61,6 +73,7 @@ export interface Property {
   expensesRepairs: number; // annual
   registrationDate: string;
   contract?: PropertyContract;
+  tenantHistory?: TenantContractRecord[];
   yearlyFinancials?: Record<number, PropertyYearlyFinancials>;
   documents?: PropertyDocument[];
 }
@@ -272,4 +285,53 @@ export function getThemeColors(themeName?: string): ThemeColors {
         badgeText: "text-blue-600",
       };
   }
+}
+
+export function getPropertyTenantsForYear(property: Property, year: number): TenantContractRecord[] {
+  let records: TenantContractRecord[] = property.tenantHistory && property.tenantHistory.length > 0
+    ? [...property.tenantHistory]
+    : [];
+
+  if (records.length === 0 && property.tenantName) {
+    records.push({
+      id: `initial_${property.id}`,
+      tenantName: property.tenantName,
+      tenantDni: property.tenantDni || "",
+      startDate: property.contract?.startDate || `${year - 2}-01-01`,
+      endDate: property.contract?.endDate,
+      monthlyRent: property.contract?.monthlyRent || property.monthlyRent || 0,
+      pdfName: property.contract?.pdfName,
+      pdfSize: property.contract?.pdfSize
+    });
+  }
+
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+
+  return records.filter(rec => {
+    const start = rec.startDate || "2000-01-01";
+    const end = rec.endDate;
+    const startsBeforeOrInYear = start <= yearEnd;
+    const endsAfterOrInYear = !end || end >= yearStart;
+    return startsBeforeOrInYear && endsAfterOrInYear;
+  });
+}
+
+export function getTenantActiveMonthsForYear(tenantRec: TenantContractRecord, year: number): number[] {
+  const activeMonths: number[] = [];
+  const start = tenantRec.startDate || `${year}-01-01`;
+  const end = tenantRec.endDate;
+
+  for (let m = 0; m < 12; m++) {
+    const monthStr = String(m + 1).padStart(2, '0');
+    const monthStart = `${year}-${monthStr}-01`;
+    const daysInMonth = new Date(year, m + 1, 0).getDate();
+    const monthEnd = `${year}-${monthStr}-${String(daysInMonth).padStart(2, '0')}`;
+
+    if (start <= monthEnd && (!end || end >= monthStart)) {
+      activeMonths.push(m);
+    }
+  }
+
+  return activeMonths;
 }

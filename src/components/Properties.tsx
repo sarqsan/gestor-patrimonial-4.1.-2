@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Property, PropertyExpense } from "../types";
+import { Property, PropertyExpense, TenantContractRecord } from "../types";
 import * as XLSX from "xlsx";
 import { 
   Building, 
@@ -24,7 +24,12 @@ import {
   Calendar,
   Sparkles,
   Loader2,
-  CheckCircle
+  CheckCircle,
+  UserPlus,
+  Users,
+  History,
+  UserCheck,
+  ArrowRight
 } from "lucide-react";
 
 interface PropertiesProps {
@@ -203,13 +208,30 @@ export default function Properties({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
 
+  // New Tenant Registration state during contract change
+  const [isTenantChangeActive, setIsTenantChangeActive] = useState(false);
+  const [newTenantName, setNewTenantName] = useState("");
+  const [newTenantDni, setNewTenantDni] = useState("");
+  const [newTenantStartDate, setNewTenantStartDate] = useState("");
+  const [newTenantMonthlyRent, setNewTenantMonthlyRent] = useState("");
+  const [newTenantPdfName, setNewTenantPdfName] = useState("");
+  const [newTenantPdfSize, setNewTenantPdfSize] = useState("");
+
   const handleToggleContractPanel = (prop: Property) => {
     if (openContractPropertyId === prop.id) {
       setOpenContractPropertyId(null);
     } else {
       setOpenContractPropertyId(prop.id);
       setOpenFiscalPropertyId(null);
-      // Initialize states
+      // Reset states
+      setIsTenantChangeActive(false);
+      setNewTenantName("");
+      setNewTenantDni("");
+      setNewTenantStartDate("");
+      setNewTenantMonthlyRent("");
+      setNewTenantPdfName("");
+      setNewTenantPdfSize("");
+
       setCardStartDate(prop.contract?.startDate || "");
       setCardEndDate(prop.contract?.endDate || "");
       setCardMonthlyRent(prop.contract?.monthlyRent?.toString() || prop.monthlyRent?.toString() || "0");
@@ -221,31 +243,188 @@ export default function Properties({
   };
 
   const handleSaveCardContract = (prop: Property) => {
+    let updatedHistory: TenantContractRecord[] = prop.tenantHistory && prop.tenantHistory.length > 0
+      ? [...prop.tenantHistory]
+      : [];
+
+    // If history is empty, initialize record for outgoing/current tenant
+    if (updatedHistory.length === 0 && prop.tenantName) {
+      updatedHistory.push({
+        id: `rec_init_${prop.id}`,
+        tenantName: prop.tenantName,
+        tenantDni: prop.tenantDni || "",
+        startDate: cardStartDate || prop.contract?.startDate || "2024-01-01",
+        endDate: cardEndDate || prop.contract?.endDate || undefined,
+        monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || prop.monthlyRent || 0),
+        pdfName: cardPdfName || prop.contract?.pdfName,
+        pdfSize: cardPdfSize || prop.contract?.pdfSize
+      });
+    } else if (updatedHistory.length > 0) {
+      // Update the latest existing record with the entered contract details
+      const lastIdx = updatedHistory.length - 1;
+      updatedHistory[lastIdx] = {
+        ...updatedHistory[lastIdx],
+        startDate: cardStartDate || updatedHistory[lastIdx].startDate,
+        endDate: cardEndDate || updatedHistory[lastIdx].endDate,
+        monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || updatedHistory[lastIdx].monthlyRent || 0),
+        pdfName: cardPdfName || updatedHistory[lastIdx].pdfName,
+        pdfSize: cardPdfSize || updatedHistory[lastIdx].pdfSize
+      };
+    }
+
+    let activeTenantName = prop.tenantName;
+    let activeTenantDni = prop.tenantDni;
+    let activeMonthlyRent = Number(cardMonthlyRent.toString().replace(",", ".") || prop.monthlyRent || 0);
+    let activeContract = {
+      startDate: cardStartDate || new Date().toISOString().split('T')[0],
+      endDate: cardEndDate || undefined,
+      monthlyRent: activeMonthlyRent,
+      pdfName: cardPdfName || undefined,
+      pdfSize: cardPdfSize || undefined
+    };
+
+    // If tenant change is requested and a new tenant name is provided
+    if (isTenantChangeActive && newTenantName.trim()) {
+      const newRentNum = Number(newTenantMonthlyRent.toString().replace(",", ".") || activeMonthlyRent);
+      const newStartStr = newTenantStartDate || cardEndDate || new Date().toISOString().split("T")[0];
+
+      // Ensure last tenant record has end date specified
+      if (updatedHistory.length > 0) {
+        const lastIdx = updatedHistory.length - 1;
+        if (!updatedHistory[lastIdx].endDate && cardEndDate) {
+          updatedHistory[lastIdx].endDate = cardEndDate;
+        } else if (!updatedHistory[lastIdx].endDate) {
+          const d = new Date(newStartStr);
+          d.setDate(d.getDate() - 1);
+          updatedHistory[lastIdx].endDate = d.toISOString().split("T")[0];
+        }
+      }
+
+      const newRecord: TenantContractRecord = {
+        id: `rec_tenant_${Date.now()}`,
+        tenantName: newTenantName.trim(),
+        tenantDni: newTenantDni.trim(),
+        startDate: newStartStr,
+        endDate: undefined,
+        monthlyRent: newRentNum,
+        pdfName: newTenantPdfName || undefined,
+        pdfSize: newTenantPdfSize || undefined
+      };
+
+      updatedHistory.push(newRecord);
+
+      activeTenantName = newTenantName.trim();
+      activeTenantDni = newTenantDni.trim();
+      activeMonthlyRent = newRentNum;
+      activeContract = {
+        startDate: newStartStr,
+        endDate: undefined,
+        monthlyRent: newRentNum,
+        pdfName: newTenantPdfName || undefined,
+        pdfSize: newTenantPdfSize || undefined
+      };
+    }
+
     const updatedProp: Property = {
       ...prop,
-      contract: {
-        startDate: cardStartDate || new Date().toISOString().split('T')[0],
-        endDate: cardEndDate || undefined,
-        monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || prop.monthlyRent || 0),
-        pdfName: cardPdfName || undefined,
-        pdfSize: cardPdfSize || undefined
-      }
+      tenantName: activeTenantName,
+      tenantDni: activeTenantDni,
+      monthlyRent: activeMonthlyRent,
+      contract: activeContract,
+      tenantHistory: updatedHistory
     };
+
     onEditProperty(updatedProp);
+
+    // Reset transition fields
+    setIsTenantChangeActive(false);
+    setNewTenantName("");
+    setNewTenantDni("");
+    setNewTenantStartDate("");
+    setNewTenantMonthlyRent("");
+    setNewTenantPdfName("");
+    setNewTenantPdfSize("");
   };
 
   const handleDeleteCardContract = (prop: Property) => {
-    const updatedProp: Property = {
-      ...prop,
-      contract: undefined
-    };
+    handleDeleteTenantRecord(prop);
+  };
+
+  const handleDeleteTenantRecord = (prop: Property, recordId?: string, recordIndex?: number) => {
+    const history: TenantContractRecord[] = prop.tenantHistory && prop.tenantHistory.length > 0
+      ? [...prop.tenantHistory]
+      : (prop.tenantName ? [{
+          id: `rec_${prop.id}`,
+          tenantName: prop.tenantName,
+          tenantDni: prop.tenantDni || "",
+          startDate: prop.contract?.startDate || "2024-01-01",
+          endDate: prop.contract?.endDate,
+          monthlyRent: prop.contract?.monthlyRent || prop.monthlyRent || 0,
+          pdfName: prop.contract?.pdfName,
+          pdfSize: prop.contract?.pdfSize
+        }] : []);
+
+    let updatedHistory: TenantContractRecord[] = [];
+
+    if (recordId) {
+      updatedHistory = history.filter((r, idx) => r.id !== recordId && (recordIndex === undefined || idx !== recordIndex));
+    } else if (recordIndex !== undefined && recordIndex >= 0) {
+      updatedHistory = history.filter((_, idx) => idx !== recordIndex);
+    } else {
+      updatedHistory = history.slice(0, -1);
+    }
+
+    let updatedProp: Property;
+
+    if (updatedHistory.length === 0) {
+      updatedProp = {
+        ...prop,
+        tenantName: "",
+        tenantDni: "",
+        contract: undefined,
+        tenantHistory: []
+      };
+      setCardStartDate("");
+      setCardEndDate("");
+      setCardMonthlyRent(prop.monthlyRent ? prop.monthlyRent.toString() : "0");
+      setCardPdfName("");
+      setCardPdfSize("");
+    } else {
+      const lastActive = updatedHistory[updatedHistory.length - 1];
+      const todayIso = new Date().toISOString().split("T")[0];
+      
+      // If the restored last active tenant had a past end date assigned due to the contract change that was just deleted, reactivate it
+      let activeEndDate = lastActive.endDate;
+      if (activeEndDate && activeEndDate < todayIso) {
+        activeEndDate = undefined;
+        updatedHistory[updatedHistory.length - 1] = {
+          ...lastActive,
+          endDate: undefined
+        };
+      }
+
+      updatedProp = {
+        ...prop,
+        tenantName: lastActive.tenantName,
+        tenantDni: lastActive.tenantDni,
+        monthlyRent: lastActive.monthlyRent,
+        contract: {
+          startDate: lastActive.startDate,
+          endDate: activeEndDate,
+          monthlyRent: lastActive.monthlyRent,
+          pdfName: lastActive.pdfName,
+          pdfSize: lastActive.pdfSize
+        },
+        tenantHistory: updatedHistory
+      };
+      setCardStartDate(lastActive.startDate || "");
+      setCardEndDate(activeEndDate || "");
+      setCardMonthlyRent(lastActive.monthlyRent ? lastActive.monthlyRent.toString() : "0");
+      setCardPdfName(lastActive.pdfName || "");
+      setCardPdfSize(lastActive.pdfSize || "");
+    }
+
     onEditProperty(updatedProp);
-    setCardStartDate("");
-    setCardEndDate("");
-    setCardMonthlyRent(prop.monthlyRent.toString());
-    setCardPdfName("");
-    setCardPdfSize("");
-    setUploadSuccess(false);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, prop: Property) => {
@@ -1180,16 +1359,31 @@ export default function Properties({
                           {user1Name.split(" ")[0]}: {prop.ownershipPercentageUser1}% | {user2Name.split(" ")[0]}: {prop.ownershipPercentageUser2}%
                         </span>
                       )}
-                      {prop.contract ? (
-                        <span className="px-2.5 py-1 bg-emerald-950/40 border border-emerald-500/20 rounded-lg text-emerald-400 flex items-center">
-                          <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse mr-1.5"></span>
-                          <span>Contrato Activo</span>
-                        </span>
-                      ) : (
-                        <span className="px-2.5 py-1 bg-amber-950/20 border border-amber-500/20 rounded-lg text-amber-500">
-                          Sin Contrato
-                        </span>
-                      )}
+                      {(() => {
+                        const todayStr = new Date().toISOString().split("T")[0];
+                        const isContractActive = prop.contract && (!prop.contract.endDate || prop.contract.endDate >= todayStr);
+                        if (isContractActive) {
+                          return (
+                            <span className="px-2.5 py-1 bg-emerald-950/40 border border-emerald-500/20 rounded-lg text-emerald-400 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse mr-1.5"></span>
+                              <span>Contrato Activo</span>
+                            </span>
+                          );
+                        } else if (prop.contract) {
+                          return (
+                            <span className="px-2.5 py-1 bg-amber-950/20 border border-amber-500/20 rounded-lg text-amber-500 flex items-center">
+                              <span className="w-1.5 h-1.5 bg-amber-400 rounded-full mr-1.5"></span>
+                              <span>Contrato Vencido</span>
+                            </span>
+                          );
+                        } else {
+                          return (
+                            <span className="px-2.5 py-1 bg-amber-950/20 border border-amber-500/20 rounded-lg text-amber-500">
+                              Sin Contrato
+                            </span>
+                          );
+                        }
+                      })()}
                     </div>
 
                     {/* Financial Metrics Split */}
@@ -1206,26 +1400,82 @@ export default function Properties({
 
                     {/* Inquilinos info */}
                     {(() => {
-                      const tenants = prop.tenantName ? prop.tenantName.split(",").map(t => t.trim()).filter(Boolean) : [];
-                      const dnis = prop.tenantDni ? prop.tenantDni.split(",").map(d => d.trim()).filter(Boolean) : [];
+                      const history: TenantContractRecord[] = prop.tenantHistory && prop.tenantHistory.length > 0
+                        ? prop.tenantHistory
+                        : (prop.tenantName ? [{
+                            id: `rec_${prop.id}`,
+                            tenantName: prop.tenantName,
+                            tenantDni: prop.tenantDni || "",
+                            startDate: prop.contract?.startDate || "2024-01-01",
+                            endDate: prop.contract?.endDate,
+                            monthlyRent: prop.contract?.monthlyRent || prop.monthlyRent || 0
+                          }] : []);
+
                       return (
-                        <div className="bg-slate-950/30 p-3.5 rounded-xl border border-slate-800 space-y-2">
-                          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-wider block">
-                            Arrendatarios / Inquilinos ({tenants.length || 0})
-                          </span>
-                          {tenants.length > 0 ? (
-                            <div className="space-y-1.5 max-h-[120px] overflow-y-auto">
-                              {tenants.map((t, idx) => (
-                                <div key={idx} className="flex justify-between items-center text-xs bg-slate-900/40 p-2 rounded-lg border border-slate-800/40">
-                                  <div className="flex items-center space-x-1.5 min-w-0">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
-                                    <span className="text-slate-200 font-medium truncate" title={t}>{t}</span>
+                        <div className="bg-slate-950/40 p-3.5 rounded-xl border border-slate-800 space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider block">
+                              Historial de Inquilinos ({history.length})
+                            </span>
+                            {history.length > 1 && (
+                              <span className="text-[9px] bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded font-mono font-bold">
+                                Cambio Registrado
+                              </span>
+                            )}
+                          </div>
+
+                          {history.length > 0 ? (
+                            <div className="space-y-1.5 max-h-[140px] overflow-y-auto">
+                              {history.map((tRec, idx) => {
+                                const todayStr = new Date().toISOString().split("T")[0];
+                                const isCurrent = idx === history.length - 1 && (!tRec.endDate || tRec.endDate >= todayStr);
+                                return (
+                                  <div 
+                                    key={tRec.id || idx} 
+                                    className={`p-2 rounded-lg border text-xs space-y-1 ${
+                                      isCurrent 
+                                        ? "bg-emerald-950/20 border-emerald-500/30 text-slate-200" 
+                                        : "bg-slate-900/40 border-slate-800 text-slate-400"
+                                    }`}
+                                  >
+                                    <div className="flex justify-between items-center">
+                                      <div className="flex items-center space-x-1.5 min-w-0">
+                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isCurrent ? "bg-emerald-400" : "bg-slate-500"}`}></span>
+                                        <span className="font-semibold text-white truncate max-w-[130px]">{tRec.tenantName}</span>
+                                        {tRec.tenantDni && (
+                                          <span className="text-[9px] text-slate-500 font-mono">({tRec.tenantDni})</span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-1">
+                                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                                          isCurrent ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" : "bg-slate-800 text-slate-400"
+                                        }`}>
+                                          {isCurrent ? "Vigente" : "Anterior"}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteTenantRecord(prop, tRec.id, idx);
+                                          }}
+                                          className="p-1 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors cursor-pointer"
+                                          title="Eliminar este inquilino del historial"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex justify-between items-center text-[9px] text-slate-400 font-mono">
+                                      <span>
+                                        {tRec.startDate ? tRec.startDate.split("-").reverse().join("/") : "---"} 
+                                        {tRec.endDate ? ` ➔ ${tRec.endDate.split("-").reverse().join("/")}` : " ➔ Vigente"}
+                                      </span>
+                                      <span className="font-bold text-indigo-300">{(tRec.monthlyRent || prop.monthlyRent).toLocaleString("es-ES")} €/m</span>
+                                    </div>
                                   </div>
-                                  <span className="text-[10px] text-slate-400 font-mono shrink-0 bg-slate-800/80 px-1.5 py-0.5 rounded border border-slate-700/30 ml-2">
-                                    {dnis[idx] || "---"}
-                                  </span>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           ) : (
                             <p className="text-xs text-slate-500 italic">No se especifican inquilinos</p>
@@ -2038,6 +2288,81 @@ export default function Properties({
                               />
                             </div>
 
+                            {/* Tenant Change Option */}
+                            <div className="bg-slate-950/80 border border-amber-500/30 rounded-xl p-3 space-y-2.5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs">
+                                  <UserPlus className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Registrar Cambio de Inquilino</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsTenantChangeActive(!isTenantChangeActive)}
+                                  className={`text-[10px] px-2 py-0.5 rounded-md font-bold font-mono transition-all border cursor-pointer ${
+                                    isTenantChangeActive 
+                                      ? "bg-amber-500 text-slate-950 border-amber-400" 
+                                      : "bg-slate-900 text-amber-400 border-amber-500/30 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  {isTenantChangeActive ? "✓ Activado" : "+ Añadir Nuevo"}
+                                </button>
+                              </div>
+
+                              <p className="text-[10px] text-slate-400 leading-tight">
+                                Al fijar fecha de fin ({cardEndDate || "en contrato"}), añade al nuevo inquilino. Durante el año de transición figurarán ambos inquilinos con sus cuotas correspondientes.
+                              </p>
+
+                              {isTenantChangeActive && (
+                                <div className="pt-2 border-t border-slate-800 space-y-2.5 animate-fade-in">
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block text-[9px] text-amber-300 font-semibold mb-1">Nuevo Inquilino</label>
+                                      <input
+                                        type="text"
+                                        placeholder="Ej: Laura Gómez"
+                                        value={newTenantName}
+                                        onChange={(e) => setNewTenantName(e.target.value)}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:ring-1 focus:ring-amber-500"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[9px] text-amber-300 font-semibold mb-1">DNI / NIF</label>
+                                      <input
+                                        type="text"
+                                        placeholder="Ej: 98765432B"
+                                        value={newTenantDni}
+                                        onChange={(e) => setNewTenantDni(e.target.value)}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:ring-1 focus:ring-amber-500"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block text-[9px] text-amber-300 font-semibold mb-1">Fecha Inicio Contrato</label>
+                                      <input
+                                        type="date"
+                                        value={newTenantStartDate}
+                                        onChange={(e) => setNewTenantStartDate(e.target.value)}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:ring-1 focus:ring-amber-500"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[9px] text-amber-300 font-semibold mb-1">Renta Nuevo Contrato (€)</label>
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        placeholder={cardMonthlyRent || "1000"}
+                                        value={newTenantMonthlyRent}
+                                        onChange={(e) => setNewTenantMonthlyRent(e.target.value)}
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-bold focus:ring-1 focus:ring-amber-500"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
                             {/* Drag & Drop simulated uploader */}
                             <div className="space-y-2">
                               <label className="block text-[10px] text-slate-400 font-mono uppercase">Digitalizar / Adjuntar PDF</label>
@@ -2072,16 +2397,37 @@ export default function Properties({
                               </div>
                             </div>
 
-                            <button
-                              onClick={() => {
-                                handleSaveCardContract(prop);
-                                alert("Contrato guardado y sincronizado exitosamente en el sistema fiscal.");
-                              }}
-                              className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-slate-950 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer mt-2"
-                            >
-                              <Check className="w-3.5 h-3.5" />
-                              <span>Guardar Contrato</span>
-                            </button>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleSaveCardContract(prop);
+                                  alert("Contrato guardado y sincronizado exitosamente en el sistema fiscal.");
+                                }}
+                                className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-slate-950 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Guardar Contrato</span>
+                              </button>
+
+                              {(prop.contract || (prop.tenantHistory && prop.tenantHistory.length > 0) || prop.tenantName) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const history = prop.tenantHistory && prop.tenantHistory.length > 0 ? prop.tenantHistory : [];
+                                    if (history.length > 0) {
+                                      handleDeleteTenantRecord(prop, history[history.length - 1].id, history.length - 1);
+                                    } else {
+                                      handleDeleteTenantRecord(prop);
+                                    }
+                                  }}
+                                  className="w-full py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Eliminar Inquilino/Contrato</span>
+                                </button>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
