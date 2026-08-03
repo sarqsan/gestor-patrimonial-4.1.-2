@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import * as XLSX from "xlsx";
+import JSZip from "jszip";
 import { 
   Building, 
   Plus, 
@@ -34,7 +35,10 @@ import {
   Paperclip,
   Eye,
   ExternalLink,
-  Image as ImageIcon
+  Image as ImageIcon,
+  FolderArchive,
+  Archive,
+  Loader2
 } from "lucide-react";
 
 interface ExpensesProps {
@@ -66,6 +70,10 @@ export default function Expenses({
 
   // Import / Export states
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [exportSelectedProperty, setExportSelectedProperty] = useState<string>("all");
+  const [exportSelectedYear, setExportSelectedYear] = useState<string>("all");
+  const [isExportingZip, setIsExportingZip] = useState(false);
+
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importPreviewData, setImportPreviewData] = useState<PropertyExpense[] | null>(null);
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
@@ -154,12 +162,27 @@ export default function Expenses({
     reader.readAsDataURL(file);
   };
 
+  // Filtered expenses helper for Export
+  const getExportFilteredExpenses = () => {
+    return expenses.filter(exp => {
+      const matchProp = exportSelectedProperty === "all" || exp.propertyId === exportSelectedProperty;
+      const matchYear = exportSelectedYear === "all" || exp.date.startsWith(exportSelectedYear);
+      return matchProp && matchYear;
+    });
+  };
+
   // Export handlers
   const handleExportJSON = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(expenses, null, 2));
+    const filtered = getExportFilteredExpenses();
+    const propName = exportSelectedProperty === "all" 
+      ? "Todos_Inmuebles" 
+      : (properties.find(p => p.id === exportSelectedProperty)?.address.split(",")[0].replace(/[^a-zA-Z0-9]/g, "_") || "Inmueble");
+    const yearName = exportSelectedYear === "all" ? "Todas_Anualidades" : `Ano_${exportSelectedYear}`;
+
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(filtered, null, 2));
     const dlAnchor = document.createElement("a");
     dlAnchor.setAttribute("href", dataStr);
-    dlAnchor.setAttribute("download", `gastos_e_ingresos_rentasync_${new Date().toISOString().split("T")[0]}.json`);
+    dlAnchor.setAttribute("download", `gastos_e_ingresos_${propName}_${yearName}_${new Date().toISOString().split("T")[0]}.json`);
     document.body.appendChild(dlAnchor);
     dlAnchor.click();
     dlAnchor.remove();
@@ -167,23 +190,117 @@ export default function Expenses({
   };
 
   const handleExportExcel = () => {
+    const filtered = getExportFilteredExpenses();
     const propMap = new Map(properties.map((p) => [p.id, p.address]));
-    const rows = expenses.map((e) => ({
+    const rows = filtered.map((e) => ({
       "ID Transacción": e.id,
       "ID Inmueble": e.propertyId,
       "Inmueble / Dirección": propMap.get(e.propertyId) || e.propertyId,
       "Tipo Registro": e.type || (e.category === "rent" ? "ingreso" : "gasto"),
-      "Categoría Fiscal": e.category,
+      "Categoría Fiscal": categories[e.category]?.label || e.category,
       "Importe (€)": e.amount,
       "Fecha": e.date,
-      "Descripción / Concepto": e.description || ""
+      "Descripción / Concepto": e.description || "",
+      "Tiene Comprobante": e.receiptUrl ? "Sí" : "No",
+      "Nombre Archivo Adjunto": e.receiptName || (e.receiptUrl ? `Comprobante_${e.id}` : "-")
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Gastos e Ingresos");
-    XLSX.writeFile(workbook, `gastos_e_ingresos_${new Date().toISOString().split("T")[0]}.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Libro Diario");
+
+    const propName = exportSelectedProperty === "all" 
+      ? "Todos_Inmuebles" 
+      : (properties.find(p => p.id === exportSelectedProperty)?.address.split(",")[0].replace(/[^a-zA-Z0-9]/g, "_") || "Inmueble");
+    const yearName = exportSelectedYear === "all" ? "Todas_Anualidades" : `Ano_${exportSelectedYear}`;
+
+    XLSX.writeFile(workbook, `gastos_e_ingresos_${propName}_${yearName}_${new Date().toISOString().split("T")[0]}.xlsx`);
     setIsExportOpen(false);
+  };
+
+  const handleExportZipPackage = async () => {
+    setIsExportingZip(true);
+    try {
+      const zip = new JSZip();
+      const filtered = getExportFilteredExpenses();
+      const propMap = new Map(properties.map((p) => [p.id, p.address]));
+
+      // 1. Prepare Excel spreadsheet inside the ZIP
+      const rows = filtered.map((e) => ({
+        "ID Transacción": e.id,
+        "ID Inmueble": e.propertyId,
+        "Inmueble / Dirección": propMap.get(e.propertyId) || e.propertyId,
+        "Tipo Registro": e.type || (e.category === "rent" ? "ingreso" : "gasto"),
+        "Categoría Fiscal": categories[e.category]?.label || e.category,
+        "Importe (€)": e.amount,
+        "Fecha": e.date,
+        "Descripción / Concepto": e.description || "",
+        "Tiene Comprobante": e.receiptUrl ? "Sí" : "No",
+        "Nombre Comprobante": e.receiptName || (e.receiptUrl ? `Comprobante_${e.id}` : "-")
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Libro Diario");
+      const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+
+      const propName = exportSelectedProperty === "all" 
+        ? "Todos_Inmuebles" 
+        : (properties.find(p => p.id === exportSelectedProperty)?.address.split(",")[0].replace(/[^a-zA-Z0-9]/g, "_") || "Inmueble");
+      const yearName = exportSelectedYear === "all" ? "Todas_Anualidades" : `Ano_${exportSelectedYear}`;
+
+      zip.file(`Libro_Diario_${propName}_${yearName}.xlsx`, excelBuffer);
+
+      // 2. Add folder with all attached receipts/invoices
+      const receiptsFolder = zip.folder("Comprobantes_y_Facturas");
+
+      filtered.forEach((exp, idx) => {
+        if (exp.receiptUrl) {
+          let extension = "png";
+          if (exp.receiptType) {
+            if (exp.receiptType.includes("pdf")) extension = "pdf";
+            else if (exp.receiptType.includes("jpeg") || exp.receiptType.includes("jpg")) extension = "jpg";
+            else if (exp.receiptType.includes("webp")) extension = "webp";
+            else if (exp.receiptType.includes("png")) extension = "png";
+          } else if (exp.receiptUrl.startsWith("data:application/pdf")) {
+            extension = "pdf";
+          }
+
+          const cleanProp = (propMap.get(exp.propertyId) || "Inmueble")
+            .split(",")[0]
+            .replace(/[^a-zA-Z0-9]/g, "_");
+          const cleanCat = (categories[exp.category]?.label || exp.category).replace(/[^a-zA-Z0-9]/g, "_");
+          
+          let fileName = exp.receiptName;
+          if (!fileName) {
+            fileName = `factura_${exp.date}_${cleanProp}_${cleanCat}_${exp.amount}EUR_${idx + 1}.${extension}`;
+          }
+
+          // Convert Data URL (Base64) into ZIP file
+          if (exp.receiptUrl.includes(",")) {
+            const base64Data = exp.receiptUrl.split(",")[1];
+            receiptsFolder?.file(fileName, base64Data, { base64: true });
+          }
+        }
+      });
+
+      // 3. Generate ZIP blob and initiate browser download
+      const zipContent = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(zipContent);
+      link.download = `Paquete_AEAT_${propName}_${yearName}_${new Date().toISOString().split("T")[0]}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+
+      setIsExportOpen(false);
+    } catch (err) {
+      console.error("Error al exportar paquete ZIP:", err);
+      alert("Ocurrió un error al empaquetar los archivos. Comprueba los documentos adjuntos.");
+    } finally {
+      setIsExportingZip(false);
+    }
   };
 
   // Import handler
@@ -502,45 +619,15 @@ export default function Expenses({
         </div>
         {!isAdding && (
           <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-2">
-            {/* EXPORT BUTTON & DROPDOWN */}
-            <div className="relative">
-              <button
-                onClick={() => setIsExportOpen(!isExportOpen)}
-                className="inline-flex items-center px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
-                title="Exportar gastos e ingresos"
-              >
-                <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
-                <span>Exportar</span>
-              </button>
-
-              {isExportOpen && (
-                <>
-                  <div className="fixed inset-0 z-30" onClick={() => setIsExportOpen(false)}></div>
-                  <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-2 z-40 text-xs">
-                    <button
-                      onClick={handleExportJSON}
-                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
-                    >
-                      <FileCode className="w-4 h-4 text-emerald-400" />
-                      <div>
-                        <div className="font-semibold">Exportar JSON</div>
-                        <div className="text-[10px] text-slate-400">Para pasar a otro perfil en la App</div>
-                      </div>
-                    </button>
-                    <button
-                      onClick={handleExportExcel}
-                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
-                    >
-                      <FileSpreadsheet className="w-4 h-4 text-indigo-400" />
-                      <div>
-                        <div className="font-semibold">Exportar Excel (.xlsx)</div>
-                        <div className="text-[10px] text-slate-400">Para abrir en Excel o Google Sheets</div>
-                      </div>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+            {/* EXPORT BUTTON */}
+            <button
+              onClick={() => setIsExportOpen(true)}
+              className="inline-flex items-center px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+              title="Exportar gastos, ingresos y comprobantes adjuntos"
+            >
+              <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
+              <span>Exportar</span>
+            </button>
 
             {/* IMPORT BUTTON */}
             <button
@@ -1261,6 +1348,185 @@ export default function Expenses({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* EXPORT MODAL WITH INMUEBLE & ANUALIDAD FILTERS + ZIP ATTACHMENT PACKAGING */}
+      {isExportOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl text-left">
+            
+            {/* Modal Header */}
+            <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-indigo-500/10 text-indigo-400 rounded-xl border border-indigo-500/20">
+                  <Archive className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Exportación de Datos y Comprobantes AEAT</h3>
+                  <p className="text-xs text-slate-400">
+                    Selecciona inmueble y ejercicio fiscal para descargar informes y facturas adjuntas
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsExportOpen(false)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              
+              {/* FILTERS SECTION */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
+                <h4 className="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-2">
+                  <Filter className="w-3.5 h-3.5" />
+                  <span>1. Seleccionar Filtros de Exportación</span>
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Property Selector */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-300 mb-1">Inmueble</label>
+                    <select
+                      value={exportSelectedProperty}
+                      onChange={(e) => setExportSelectedProperty(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-medium text-slate-200 focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                    >
+                      <option value="all">Todos los Inmuebles ({properties.length})</option>
+                      {properties.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.address.split(",")[0]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Year / Anualidad Selector */}
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-300 mb-1">Anualidad / Ejercicio</label>
+                    <select
+                      value={exportSelectedYear}
+                      onChange={(e) => setExportSelectedYear(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-medium text-slate-200 focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                    >
+                      <option value="all">Todas las Anualidades (Últimos 5 años)</option>
+                      {availableYears.map((yr) => (
+                        <option key={yr} value={yr.toString()}>
+                          Año {yr}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Selection Summary Badge */}
+                <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-400">Registros seleccionados:</span>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 px-2.5 py-0.5 rounded-md font-mono font-bold text-[11px]">
+                      {getExportFilteredExpenses().length} registros
+                    </span>
+                    <span className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-2.5 py-0.5 rounded-md font-mono font-bold text-[11px] flex items-center gap-1">
+                      <Paperclip className="w-3 h-3 text-emerald-400" />
+                      {getExportFilteredExpenses().filter(e => e.receiptUrl).length} facturas/archivos
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* EXPORT FORMAT OPTIONS */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                  <Download className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>2. Elegir Formato de Descarga</span>
+                </h4>
+
+                {/* OPTION 1: COMPLETE ZIP PACKAGE (Excel + Attached Receipts) */}
+                <button
+                  type="button"
+                  disabled={isExportingZip}
+                  onClick={handleExportZipPackage}
+                  className="w-full text-left p-4 rounded-xl bg-gradient-to-r from-indigo-950/80 to-slate-900 hover:from-indigo-900/90 hover:to-slate-800 border-2 border-indigo-500/50 hover:border-indigo-400 text-white transition-all cursor-pointer shadow-lg group relative overflow-hidden disabled:opacity-50"
+                >
+                  <div className="flex items-start gap-3.5">
+                    <div className="p-3 bg-indigo-500/20 text-indigo-300 rounded-xl border border-indigo-500/30 shrink-0 group-hover:scale-110 transition-transform">
+                      {isExportingZip ? (
+                        <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
+                      ) : (
+                        <FolderArchive className="w-6 h-6 text-indigo-400" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-sm text-white group-hover:text-indigo-200 flex items-center gap-1.5">
+                          Paquete Completo ZIP (Excel + Facturas y Comprobantes)
+                        </span>
+                        <span className="bg-indigo-500 text-slate-950 text-[10px] font-black uppercase px-2 py-0.5 rounded-md">
+                          Recomendado AEAT
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                        Descarga un paquete .zip con la hoja Excel filtrada y la carpeta con todas las facturas, justificantes e imágenes subidas para ese inmueble y ejercicio.
+                      </p>
+                    </div>
+                  </div>
+                </button>
+
+                {/* OPTION 2: ONLY EXCEL (.xlsx) */}
+                <button
+                  type="button"
+                  onClick={handleExportExcel}
+                  className="w-full text-left p-3.5 rounded-xl bg-slate-950/50 hover:bg-slate-800 border border-slate-700 hover:border-slate-600 text-slate-200 transition-all cursor-pointer flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-emerald-500/10 text-emerald-400 rounded-lg">
+                      <FileSpreadsheet className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-xs text-white">Solo Hoja de Cálculo Excel (.xlsx)</div>
+                      <div className="text-[11px] text-slate-400">Libro diario contable filtrado listo para Excel o Google Sheets</div>
+                    </div>
+                  </div>
+                  <Download className="w-4 h-4 text-slate-400 shrink-0" />
+                </button>
+
+                {/* OPTION 3: ONLY JSON (.json) */}
+                <button
+                  type="button"
+                  onClick={handleExportJSON}
+                  className="w-full text-left p-3.5 rounded-xl bg-slate-950/50 hover:bg-slate-800 border border-slate-700 hover:border-slate-600 text-slate-200 transition-all cursor-pointer flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-slate-800 text-slate-400 rounded-lg">
+                      <FileCode className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-xs text-white">Solo Datos en Formato JSON (.json)</div>
+                      <div className="text-[11px] text-slate-400">Para importar o sincronizar en otros perfiles de la app</div>
+                    </div>
+                  </div>
+                  <Download className="w-4 h-4 text-slate-400 shrink-0" />
+                </button>
+              </div>
+
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 bg-slate-950 border-t border-slate-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsExportOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-xs transition-colors cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+
+          </div>
         </div>
       )}
 
