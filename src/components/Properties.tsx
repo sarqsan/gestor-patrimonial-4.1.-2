@@ -823,45 +823,15 @@ export default function Properties({
         </div>
         {!isAdding && !editingId && (
           <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-2">
-            {/* EXPORT BUTTON & DROPDOWN */}
-            <div className="relative">
-              <button
-                onClick={() => setIsExportOpen(!isExportOpen)}
-                className="inline-flex items-center px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
-                title="Exportar inmuebles"
-              >
-                <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
-                <span>Exportar</span>
-              </button>
-
-              {isExportOpen && (
-                <>
-                  <div className="fixed inset-0 z-30" onClick={() => setIsExportOpen(false)}></div>
-                  <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-2 z-40 text-xs">
-                    <button
-                      onClick={handleExportJSON}
-                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
-                    >
-                      <FileCode className="w-4 h-4 text-emerald-400" />
-                      <div>
-                        <div className="font-semibold">Exportar JSON</div>
-                        <div className="text-[10px] text-slate-400">Para pasar a otro perfil en la App</div>
-                      </div>
-                    </button>
-                    <button
-                      onClick={handleExportExcel}
-                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
-                    >
-                      <FileSpreadsheet className="w-4 h-4 text-indigo-400" />
-                      <div>
-                        <div className="font-semibold">Exportar Excel (.xlsx)</div>
-                        <div className="text-[10px] text-slate-400">Para abrir en Excel o Google Sheets</div>
-                      </div>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+            {/* EXPORT BUTTON */}
+            <button
+              onClick={() => setIsExportOpen(true)}
+              className="inline-flex items-center px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+              title="Exportar inmuebles"
+            >
+              <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
+              <span>Exportar</span>
+            </button>
 
             {/* IMPORT BUTTON */}
             <button
@@ -2449,6 +2419,72 @@ export default function Properties({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* EXPORT MODAL */}
+      {isExportOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-scale-up">
+            <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-800/40">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-xl border border-indigo-500/20">
+                  <Download className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Exportar Inmuebles</h3>
+                  <p className="text-xs text-slate-400">Selecciona el formato de exportación deseado</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsExportOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <button
+                onClick={handleExportJSON}
+                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800/60 hover:bg-slate-800 hover:border-emerald-500/50 text-slate-200 flex items-center gap-3 transition-all cursor-pointer group"
+              >
+                <div className="p-2.5 bg-emerald-500/10 text-emerald-400 rounded-xl border border-emerald-500/20 shrink-0 group-hover:scale-105 transition-transform">
+                  <FileCode className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="font-bold text-sm text-white flex items-center gap-2">
+                    Exportar JSON
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20">Recomendado</span>
+                  </div>
+                  <div className="text-xs text-slate-400 mt-0.5">Copia exacta de los datos para importar en otra cuenta o perfil de la App.</div>
+                </div>
+              </button>
+
+              <button
+                onClick={handleExportExcel}
+                className="w-full text-left p-4 rounded-xl border border-slate-700 bg-slate-800/60 hover:bg-slate-800 hover:border-indigo-500/50 text-slate-200 flex items-center gap-3 transition-all cursor-pointer group"
+              >
+                <div className="p-2.5 bg-indigo-500/10 text-indigo-400 rounded-xl border border-indigo-500/20 shrink-0 group-hover:scale-105 transition-transform">
+                  <FileSpreadsheet className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="font-bold text-sm text-white">Exportar Excel (.xlsx)</div>
+                  <div className="text-xs text-slate-400 mt-0.5">Formato de hoja de cálculo ideal para abrir en Microsoft Excel o Google Sheets.</div>
+                </div>
+              </button>
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-800/40 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsExportOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl text-xs transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
