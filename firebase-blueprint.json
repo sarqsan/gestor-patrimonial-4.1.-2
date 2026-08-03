@@ -1,0 +1,46 @@
+{
+  "schema": {
+    "collections": {
+      "users": {
+        "description": "Cuentas de usuario y carteras de RentaSync",
+        "documents": {
+          "{userId}": {
+            "fields": {
+              "username": { "type": "string", "description": "Nombre de usuario" },
+              "updatedAt": { "type": "string", "description": "Fecha de última actualización" }
+            },
+            "subcollections": {
+              "data": {
+                "documents": {
+                  "portfolio": {
+                    "fields": {
+                      "properties": { "type": "array", "description": "Lista de inmuebles" },
+                      "payments": { "type": "array", "description": "Histórico de cobros de alquiler" },
+                      "expenses": { "type": "array", "description": "Histórico de gastos e impuestos" },
+                      "contracts": { "type": "array", "description": "Contratos digitales de arrendamiento" },
+                      "yearlyProfiles": { "type": "map", "description": "Perfiles fiscales del IRPF por ejercicio" },
+                      "syncEvents": { "type": "array", "description": "Log de eventos de sincronización" },
+                      "currentYear": { "type": "number", "description": "Ejercicio fiscal seleccionado" },
+                      "updatedAt": { "type": "string", "description": "Timestamp ISO de sincronización" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security_rules": {
+    "match /databases/{database}/documents": {
+      "match /users/{userId}": {
+        "allow read, write": "true;",
+        "match /{document=**}": {
+          "allow read, write": "true;"
+        }
+      }
+    }
+  },
+  "indexes": []
+}

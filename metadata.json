@@ -1,0 +1,8 @@
+{
+  "name": "Remix Logeado 4.1.2",
+  "description": "Gestor inteligente de alquileres y fiscalidad con extracción de datos de la Declaración de la Renta, control de rendimientos individuales/conjuntos y sincronización automática entre módulos de inmuebles, cobros e impuestos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

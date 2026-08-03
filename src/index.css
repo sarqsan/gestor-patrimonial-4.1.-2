@@ -1,0 +1,433 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-slide-in {
+  animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* LIGHT THEMES OVERRIDES (Claros y Limpios) */
+[class*="theme-light-"] {
+  background-color: #f8fafc !important;
+  color: #1e293b !important;
+}
+
+[class*="theme-light-"] header {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-color: #e2e8f0 !important;
+}
+
+[class*="theme-light-"] header h1 {
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] header button {
+  background-color: #f1f5f9 !important;
+  color: #1e293b !important;
+  border-color: #cbd5e1 !important;
+}
+
+[class*="theme-light-"] header button:hover {
+  background-color: #e2e8f0 !important;
+}
+
+[class*="theme-light-"] h1,
+[class*="theme-light-"] h2,
+[class*="theme-light-"] h3,
+[class*="theme-light-"] h4,
+[class*="theme-light-"] h5,
+[class*="theme-light-"] h6,
+[class*="theme-light-"] .text-white {
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] p {
+  color: #334155 !important;
+}
+
+[class*="theme-light-"] .text-slate-100,
+[class*="theme-light-"] .text-slate-200,
+[class*="theme-light-"] .text-slate-300 {
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] .text-slate-400 {
+  color: #475569 !important;
+}
+
+[class*="theme-light-"] .text-slate-500 {
+  color: #64748b !important;
+}
+
+/* Cards, list items, and sections */
+[class*="theme-light-"] .bg-slate-900,
+[class*="theme-light-"] .bg-slate-900\/50,
+[class*="theme-light-"] .bg-slate-900\/30,
+[class*="theme-light-"] .bg-slate-950\/50,
+[class*="theme-light-"] .bg-slate-950\/40,
+[class*="theme-light-"] .bg-slate-900\/40,
+[class*="theme-light-"] .bg-slate-800\/40,
+[class*="theme-light-"] .bg-slate-800\/30,
+[class*="theme-light-"] .bg-slate-800\/20,
+[class*="theme-light-"] .bg-slate-900\/60,
+[class*="theme-light-"] #card-taxes,
+[class*="theme-light-"] .bg-slate-900\/90 {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px -2px rgba(0, 0, 0, 0.02) !important;
+}
+
+/* Secondary background panels and dropdown lists */
+[class*="theme-light-"] .bg-slate-950,
+[class*="theme-light-"] .bg-slate-950\/80,
+[class*="theme-light-"] .bg-slate-950\/60,
+[class*="theme-light-"] .bg-slate-900\/80 {
+  background-color: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+}
+
+[class*="theme-light-"] .border-slate-800,
+[class*="theme-light-"] .border-slate-805,
+[class*="theme-light-"] .border-slate-700,
+[class*="theme-light-"] .border-slate-700\/60,
+[class*="theme-light-"] .border-slate-700\/50,
+[class*="theme-light-"] .border-slate-705 {
+  border-color: #cbd5e1 !important;
+}
+
+/* Form Fields and Interactive Inputs */
+[class*="theme-light-"] input,
+[class*="theme-light-"] select,
+[class*="theme-light-"] textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+  box-shadow: none !important;
+}
+
+[class*="theme-light-"] select option {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] .bg-slate-800\/60 {
+  background-color: #cbd5e1 !important;
+}
+
+[class*="theme-light-"] .bg-slate-800 {
+  background-color: #f1f5f9 !important;
+}
+
+[class*="theme-light-"] .hover\:bg-slate-800\/20:hover {
+  background-color: rgba(15, 23, 42, 0.05) !important;
+}
+
+[class*="theme-light-"] .bg-indigo-950\/20,
+[class*="theme-light-"] .bg-cyan-950\/20,
+[class*="theme-light-"] .bg-emerald-950\/20,
+[class*="theme-light-"] .bg-amber-950\/20 {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Navigation selector items styling inside the dropdown */
+[class*="theme-light-"] header button + div button {
+  color: #334155 !important;
+}
+[class*="theme-light-"] header button + div button:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Tooltips & Labels for Recharts */
+[class*="theme-light-"] .recharts-default-tooltip {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] .recharts-tooltip-label {
+  color: #0f172a !important;
+}
+
+[class*="theme-light-"] .recharts-text {
+  fill: #475569 !important;
+}
+
+/* ==========================================================================
+   THEME-SPECIFIC ACCENTS & BACKGROUNDS OVERRIDES (COMPLETO)
+   ========================================================================== */
+
+/* --- 1. LIGHT MINT (Menta Fresca) --- */
+.theme-light-mint {
+  background-color: #f0fdf4 !important;
+}
+/* Cards, containers and badges in mint */
+.theme-light-mint .bg-slate-900,
+.theme-light-mint .bg-slate-900\/50,
+.theme-light-mint .bg-slate-900\/30,
+.theme-light-mint .bg-slate-950\/50,
+.theme-light-mint .bg-slate-950\/40,
+.theme-light-mint .bg-slate-900\/40,
+.theme-light-mint .bg-slate-800\/40,
+.theme-light-mint .bg-slate-800\/30,
+.theme-light-mint .bg-slate-800\/20,
+.theme-light-mint .bg-slate-900\/60,
+.theme-light-mint #card-taxes,
+.theme-light-mint .bg-indigo-950\/20,
+.theme-light-mint .bg-cyan-950\/20,
+.theme-light-mint .bg-emerald-950\/20,
+.theme-light-mint .bg-amber-950\/20 {
+  background-color: #ffffff !important;
+  border-color: #dcfce7 !important;
+}
+/* Override indigo colors to emerald green */
+.theme-light-mint .text-indigo-400,
+.theme-light-mint .text-indigo-300,
+.theme-light-mint .text-indigo-600 {
+  color: #059669 !important;
+}
+.theme-light-mint .bg-indigo-600,
+.theme-light-mint .bg-indigo-500 {
+  background-color: #059669 !important;
+}
+.theme-light-mint .hover\:bg-indigo-500:hover,
+.theme-light-mint .hover\:bg-indigo-600:hover,
+.theme-light-mint button.bg-indigo-600:hover {
+  background-color: #047857 !important;
+}
+.theme-light-mint .bg-indigo-600\/20,
+.theme-light-mint .bg-indigo-950\/20,
+.theme-light-mint .bg-indigo-950\/30,
+.theme-light-mint .bg-indigo-600\/15 {
+  background-color: #e6fbf0 !important;
+  color: #059669 !important;
+}
+.theme-light-mint .border-indigo-500\/30,
+.theme-light-mint .border-indigo-500\/20,
+.theme-light-mint .border-indigo-500\/15 {
+  border-color: #a7f3d0 !important;
+}
+
+/* --- 2. LIGHT AMBER (Ámbar Cálido Claro) --- */
+.theme-light-amber {
+  background-color: #fffbeb !important;
+}
+/* Cards, containers and badges in amber */
+.theme-light-amber .bg-slate-900,
+.theme-light-amber .bg-slate-900\/50,
+.theme-light-amber .bg-slate-900\/30,
+.theme-light-amber .bg-slate-950\/50,
+.theme-light-amber .bg-slate-950\/40,
+.theme-light-amber .bg-slate-900\/40,
+.theme-light-amber .bg-slate-800\/40,
+.theme-light-amber .bg-slate-800\/30,
+.theme-light-amber .bg-slate-800\/20,
+.theme-light-amber .bg-slate-900\/60,
+.theme-light-amber #card-taxes,
+.theme-light-amber .bg-indigo-950\/20,
+.theme-light-amber .bg-cyan-950\/20,
+.theme-light-amber .bg-emerald-950\/20,
+.theme-light-amber .bg-amber-950\/20 {
+  background-color: #ffffff !important;
+  border-color: #fef3c7 !important;
+}
+/* Override indigo colors to amber orange */
+.theme-light-amber .text-indigo-400,
+.theme-light-amber .text-indigo-300,
+.theme-light-amber .text-indigo-600 {
+  color: #d97706 !important;
+}
+.theme-light-amber .bg-indigo-600,
+.theme-light-amber .bg-indigo-500 {
+  background-color: #d97706 !important;
+}
+.theme-light-amber .hover\:bg-indigo-500:hover,
+.theme-light-amber .hover\:bg-indigo-600:hover,
+.theme-light-amber button.bg-indigo-600:hover {
+  background-color: #b45309 !important;
+}
+.theme-light-amber .bg-indigo-600\/20,
+.theme-light-amber .bg-indigo-950\/20,
+.theme-light-amber .bg-indigo-950\/30,
+.theme-light-amber .bg-indigo-600\/15 {
+  background-color: #fffbeb !important;
+  color: #d97706 !important;
+}
+.theme-light-amber .border-indigo-500\/30,
+.theme-light-amber .border-indigo-500\/20,
+.theme-light-amber .border-indigo-500\/15 {
+  border-color: #fde68a !important;
+}
+
+/* --- 3. LIGHT ROYAL (Azul Ejecutivo) --- */
+.theme-light-royal {
+  background-color: #f0f9ff !important;
+}
+/* Cards, containers and badges in blue */
+.theme-light-royal .bg-slate-900,
+.theme-light-royal .bg-slate-900\/50,
+.theme-light-royal .bg-slate-900\/30,
+.theme-light-royal .bg-slate-950\/50,
+.theme-light-royal .bg-slate-950\/40,
+.theme-light-royal .bg-slate-900\/40,
+.theme-light-royal .bg-slate-800\/40,
+.theme-light-royal .bg-slate-800\/30,
+.theme-light-royal .bg-slate-800\/20,
+.theme-light-royal .bg-slate-900\/60,
+.theme-light-royal #card-taxes,
+.theme-light-royal .bg-indigo-950\/20,
+.theme-light-royal .bg-cyan-950\/20,
+.theme-light-royal .bg-emerald-950\/20,
+.theme-light-royal .bg-amber-950\/20 {
+  background-color: #ffffff !important;
+  border-color: #e0f2fe !important;
+}
+/* Override indigo colors to royal blue */
+.theme-light-royal .text-indigo-400,
+.theme-light-royal .text-indigo-300,
+.theme-light-royal .text-indigo-600 {
+  color: #2563eb !important;
+}
+.theme-light-royal .bg-indigo-600,
+.theme-light-royal .bg-indigo-500 {
+  background-color: #2563eb !important;
+}
+.theme-light-royal .hover\:bg-indigo-500:hover,
+.theme-light-royal .hover\:bg-indigo-600:hover,
+.theme-light-royal button.bg-indigo-600:hover {
+  background-color: #1d4ed8 !important;
+}
+.theme-light-royal .bg-indigo-600\/20,
+.theme-light-royal .bg-indigo-950\/20,
+.theme-light-royal .bg-indigo-950\/30,
+.theme-light-royal .bg-indigo-600\/15 {
+  background-color: #f0f9ff !important;
+  color: #2563eb !important;
+}
+.theme-light-royal .border-indigo-500\/30,
+.theme-light-royal .border-indigo-500\/20,
+.theme-light-royal .border-indigo-500\/15 {
+  border-color: #bae6fd !important;
+}
+
+/* --- 4. COSMIC TEAL (Teal Cósmico - Oscuro) --- */
+.theme-cosmic-teal {
+  background-color: #030712 !important;
+}
+.theme-cosmic-teal .text-indigo-400,
+.theme-cosmic-teal .text-indigo-300 {
+  color: #22d3ee !important;
+}
+.theme-cosmic-teal .bg-indigo-600,
+.theme-cosmic-teal .bg-indigo-500 {
+  background-color: #0891b2 !important;
+}
+.theme-cosmic-teal .hover\:bg-indigo-500:hover,
+.theme-cosmic-teal .hover\:bg-indigo-600:hover {
+  background-color: #0e7490 !important;
+}
+.theme-cosmic-teal .bg-indigo-600\/20,
+.theme-cosmic-teal .bg-indigo-950\/20,
+.theme-cosmic-teal .bg-indigo-950\/30,
+.theme-cosmic-teal .bg-indigo-600\/15 {
+  background-color: rgba(6, 182, 212, 0.15) !important;
+  color: #22d3ee !important;
+}
+.theme-cosmic-teal .border-indigo-500\/30,
+.theme-cosmic-teal .border-indigo-500\/20,
+.theme-cosmic-teal .border-indigo-500\/15 {
+  border-color: rgba(6, 182, 212, 0.25) !important;
+}
+
+/* --- 5. WARM AMBER (Cálido Ámbar - Oscuro) --- */
+.theme-warm-amber {
+  background-color: #0c0a09 !important;
+}
+.theme-warm-amber .text-indigo-400,
+.theme-warm-amber .text-indigo-300 {
+  color: #fbbf24 !important;
+}
+.theme-warm-amber .bg-indigo-600,
+.theme-warm-amber .bg-indigo-500 {
+  background-color: #d97706 !important;
+}
+.theme-warm-amber .hover\:bg-indigo-500:hover,
+.theme-warm-amber .hover\:bg-indigo-600:hover {
+  background-color: #b45309 !important;
+}
+.theme-warm-amber .bg-indigo-600\/20,
+.theme-warm-amber .bg-indigo-950\/20,
+.theme-warm-amber .bg-indigo-950\/30,
+.theme-warm-amber .bg-indigo-600\/15 {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+  color: #fbbf24 !important;
+}
+.theme-warm-amber .border-indigo-500\/30,
+.theme-warm-amber .border-indigo-500\/20,
+.theme-warm-amber .border-indigo-500\/15 {
+  border-color: rgba(245, 158, 11, 0.25) !important;
+}
+
+/* --- 6. EMERALD FOREST (Esmeralda Financiero - Oscuro) --- */
+.theme-emerald-forest {
+  background-color: #022c22 !important;
+}
+.theme-emerald-forest .text-indigo-400,
+.theme-emerald-forest .text-indigo-300 {
+  color: #34d399 !important;
+}
+.theme-emerald-forest .bg-indigo-600,
+.theme-emerald-forest .bg-indigo-500 {
+  background-color: #059669 !important;
+}
+.theme-emerald-forest .hover\:bg-indigo-500:hover,
+.theme-emerald-forest .hover\:bg-indigo-600:hover {
+  background-color: #047857 !important;
+}
+.theme-emerald-forest .bg-indigo-600\/20,
+.theme-emerald-forest .bg-indigo-950\/20,
+.theme-emerald-forest .bg-indigo-950\/30,
+.theme-emerald-forest .bg-indigo-600\/15 {
+  background-color: rgba(16, 182, 129, 0.15) !important;
+  color: #34d399 !important;
+}
+.theme-emerald-forest .border-indigo-500\/30,
+.theme-emerald-forest .border-indigo-500\/20,
+.theme-emerald-forest .border-indigo-500\/15 {
+  border-color: rgba(16, 182, 129, 0.25) !important;
+}
+
