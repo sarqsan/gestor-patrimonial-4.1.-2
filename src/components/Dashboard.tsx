@@ -482,7 +482,7 @@ export default function Dashboard({
       {/* SECTION 1: HEADER SUMMARY */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-800 pb-5">
         <div>
-          <h1 className="text-2xl font-bold text-white font-sans tracking-tight">Dashboard Patrimonial y de Renta</h1>
+          <h1 className="text-2xl font-bold text-white font-sans tracking-tight">Panel de Control</h1>
           <p className="text-sm text-slate-400 mt-1">
             Resumen consolidado e individual del capital inmobiliario y rendimientos del trabajo.
           </p>

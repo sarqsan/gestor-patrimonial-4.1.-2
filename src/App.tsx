@@ -870,7 +870,7 @@ export default function App() {
 
   // Dropdown list
   const tabConfig = {
-    dashboard: { label: "Dashboard Patrimonial y de Renta", icon: LayoutDashboard },
+    dashboard: { label: "Panel de Control", icon: LayoutDashboard },
     properties: { label: "Cartera de Inmuebles (Mis Inmuebles)", icon: Building },
     expenses: { label: "Gestión de Gastos de Alquiler", icon: Receipt },
     contracts: { label: "Redactor de Contratos (Ley Vivienda 2024)", icon: FileText },
@@ -881,42 +881,42 @@ export default function App() {
   const ActiveIconComponent = tabConfig[activeTab].icon;
 
   return (
-    <div id="app-workspace" className={`min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased theme-${state.theme || "slate-indigo"}`}>
+    <div id="app-workspace" className={`min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased max-w-full overflow-x-hidden theme-${state.theme || "slate-indigo"}`}>
       
       {/* HEADER BAR */}
-      <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 sm:px-6 py-3.5 flex justify-between items-center shadow-lg">
-        <div className="flex items-center space-x-3">
-          <div className={`${themeColors.primaryBgLight} ${themeColors.primaryText} p-2 rounded-xl border ${themeColors.primaryBorder}`}>
-            <Sparkles className="w-5 h-5" />
+      <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-3 sm:px-6 py-3 flex items-center justify-between gap-2 shadow-lg max-w-full">
+        <div className="flex items-center space-x-2.5 min-w-0 shrink">
+          <div className={`${themeColors.primaryBgLight} ${themeColors.primaryText} p-1.5 sm:p-2 rounded-xl border ${themeColors.primaryBorder} shrink-0`}>
+            <Sparkles className="w-4 h-4 sm:w-5 sm:h-5" />
           </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className={`text-[10px] uppercase font-mono tracking-wider font-extrabold ${themeColors.primaryText} block leading-tight`}>Agencia Inteligente</span>
-              <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold flex items-center gap-1">
-                <Database className="w-2.5 h-2.5 text-amber-400" /> Firebase Firestore
+          <div className="min-w-0">
+            <div className="flex items-center space-x-1.5">
+              <span className={`text-[9px] sm:text-[10px] uppercase font-mono tracking-wider font-extrabold ${themeColors.primaryText} hidden sm:block leading-tight`}>Agencia Inteligente</span>
+              <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[8px] sm:text-[9px] px-1.5 py-0.5 rounded-full font-mono font-bold hidden xs:flex items-center gap-1 shrink-0">
+                <Database className="w-2.5 h-2.5 text-amber-400" /> Firebase
               </span>
             </div>
-            <h1 className="text-sm font-black text-white tracking-tight">RentaSync</h1>
+            <h1 className="text-xs sm:text-sm font-black text-white tracking-tight truncate">RentaSync</h1>
           </div>
         </div>
 
-        {/* REVOLUTIONARY MODULE SELECTOR DROPDOWN (Fuera del Dashboard en desplegable) */}
-        <div className="relative">
+        {/* REVOLUTIONARY MODULE SELECTOR DROPDOWN */}
+        <div className="relative shrink-0 min-w-0 z-50">
           <button
             onClick={() => setDropdownOpen(!dropdownOpen)}
-            className="inline-flex items-center justify-between px-4 py-2 bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 rounded-xl text-xs font-semibold text-slate-200 transition-all cursor-pointer min-w-[240px] shadow-sm select-none"
+            className="inline-flex items-center justify-between px-2.5 sm:px-4 py-1.5 sm:py-2 bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 rounded-xl text-xs font-semibold text-slate-200 transition-all cursor-pointer min-w-0 max-w-[170px] xs:max-w-[220px] sm:max-w-xs sm:min-w-[220px] shadow-sm select-none"
           >
-            <div className="flex items-center space-x-2 truncate">
-              <ActiveIconComponent className={`w-4 h-4 ${themeColors.primaryText} shrink-0`} />
-              <span className="truncate">{tabConfig[activeTab].label}</span>
+            <div className="flex items-center space-x-1.5 sm:space-x-2 truncate min-w-0">
+              <ActiveIconComponent className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${themeColors.primaryText} shrink-0`} />
+              <span className="truncate text-[11px] sm:text-xs">{tabConfig[activeTab].label}</span>
             </div>
-            <ChevronDown className={`w-4 h-4 ml-2 text-slate-500 transition-transform duration-200 ${dropdownOpen ? "rotate-180" : ""}`} />
+            <ChevronDown className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ml-1 text-slate-500 shrink-0 transition-transform duration-200 ${dropdownOpen ? "rotate-180" : ""}`} />
           </button>
 
           {dropdownOpen && (
             <>
-              <div className="fixed inset-0 z-30" onClick={() => setDropdownOpen(false)}></div>
-              <div className="absolute right-0 mt-2 w-72 bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl py-2 z-40 animate-slide-in">
+              <div className="fixed inset-0 z-40" onClick={() => setDropdownOpen(false)}></div>
+              <div className="absolute right-0 mt-2 w-72 max-w-[calc(100vw-1.5rem)] bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl py-2 z-50 animate-slide-in">
                 <div className="px-3 py-2 border-b border-slate-800">
                   <span className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500">Módulos Activos y Sincronizados</span>
                 </div>

@@ -100,8 +100,9 @@ export default function RentControl({
         </p>
 
         {properties.length > 0 ? (
-          <table className="w-full text-left border-collapse mt-4 text-xs font-sans min-w-[1000px]">
-            <thead>
+          <div className="overflow-x-auto max-w-full">
+            <table className="w-full text-left border-collapse mt-4 text-xs font-sans min-w-[1000px]">
+              <thead>
               <tr className="border-b border-slate-700/60 text-slate-400 font-mono text-[10px] uppercase tracking-wider">
                 <th className="py-3 px-2">Inmueble / Inquilino</th>
                 <th className="py-3 px-2 text-right">Renta</th>
@@ -168,6 +169,7 @@ export default function RentControl({
               ))}
             </tbody>
           </table>
+        </div>
         ) : (
           <div className="text-center text-slate-500 py-12">
             No tienes inmuebles registrados en la cartera. No se pueden gestionar cobros.
