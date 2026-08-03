@@ -93,6 +93,8 @@ export interface PropertyExpense {
   date: string; // YYYY-MM-DD
   description?: string;
   receiptUrl?: string;
+  receiptName?: string;
+  receiptType?: string;
 }
 
 export interface AppState {

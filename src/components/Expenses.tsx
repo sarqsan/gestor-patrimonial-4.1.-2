@@ -30,7 +30,11 @@ import {
   FileSpreadsheet,
   FileCode,
   X,
-  AlertCircle
+  AlertCircle,
+  Paperclip,
+  Eye,
+  ExternalLink,
+  Image as ImageIcon
 } from "lucide-react";
 
 interface ExpensesProps {
@@ -72,8 +76,80 @@ export default function Expenses({
   const [amount, setAmount] = useState<string>("");
   const [date, setDate] = useState<string>(new Date().toISOString().split("T")[0]);
   const [description, setDescription] = useState("");
+  const [receiptUrl, setReceiptUrl] = useState<string | undefined>(undefined);
+  const [receiptName, setReceiptName] = useState<string | undefined>(undefined);
+  const [receiptType, setReceiptType] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [amortNotification, setAmortNotification] = useState<{ text: string; isError: boolean } | null>(null);
+
+  // Receipt Viewer Modal state
+  const [selectedReceiptExpense, setSelectedReceiptExpense] = useState<PropertyExpense | null>(null);
+
+  // File Upload Handler for Form
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 10 * 1024 * 1024) {
+      setError("El archivo seleccionado supera el límite de 10MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      setReceiptUrl(result);
+      setReceiptName(file.name);
+      setReceiptType(file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg"));
+      setError(null);
+    };
+    reader.onerror = () => {
+      setError("Error al leer el archivo seleccionado.");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveReceipt = () => {
+    setReceiptUrl(undefined);
+    setReceiptName(undefined);
+    setReceiptType(undefined);
+  };
+
+  // Direct File Attach Handler from Table
+  const handleDirectAttachReceipt = (expenseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 10 * 1024 * 1024) {
+      alert("El archivo seleccionado supera el límite de 10MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      const fType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+      const updatedExpenses = expenses.map(item => {
+        if (item.id === expenseId) {
+          return {
+            ...item,
+            receiptUrl: result,
+            receiptName: file.name,
+            receiptType: fType
+          };
+        }
+        return item;
+      });
+
+      if (onImportExpenses) {
+        onImportExpenses(updatedExpenses, 'replace');
+      } else {
+        const target = updatedExpenses.find(x => x.id === expenseId);
+        if (target) onAddExpense(target);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   // Export handlers
   const handleExportJSON = () => {
@@ -254,6 +330,9 @@ export default function Expenses({
     setAmount("");
     setDate(new Date().toISOString().split("T")[0]);
     setDescription("");
+    setReceiptUrl(undefined);
+    setReceiptName(undefined);
+    setReceiptType(undefined);
     setError(null);
   };
 
@@ -290,7 +369,10 @@ export default function Expenses({
       type: opType,
       amount: parsedAmount,
       date,
-      description: description.trim() || undefined
+      description: description.trim() || undefined,
+      receiptUrl,
+      receiptName,
+      receiptType
     };
 
     onAddExpense(newExpense);
@@ -671,6 +753,92 @@ export default function Expenses({
               />
             </div>
 
+            {/* Document / Receipt / Invoice Attachment */}
+            <div className="md:col-span-2 bg-slate-950/60 border border-slate-800 rounded-xl p-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-2">
+                <label className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Paperclip className="w-4 h-4 text-indigo-400" />
+                  <span>Comprobante / Factura / Justificante (AEAT)</span>
+                  <span className="text-[10px] text-slate-500 font-normal lowercase">(opcional)</span>
+                </label>
+                <span className="text-[10px] text-slate-500 font-mono">Formatos: JPG, PNG, WEBP, PDF (Máx 10MB)</span>
+              </div>
+
+              {!receiptUrl ? (
+                <div className="relative border-2 border-dashed border-slate-700/80 hover:border-indigo-500/60 rounded-xl p-5 text-center transition-colors bg-slate-900/30">
+                  <input
+                    type="file"
+                    accept="image/*,.pdf,application/pdf"
+                    onChange={handleFileChange}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  />
+                  <div className="flex flex-col items-center justify-center space-y-2 pointer-events-none">
+                    <div className="p-3 bg-indigo-500/10 text-indigo-400 rounded-full border border-indigo-500/20">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                    <p className="text-xs font-medium text-slate-300">
+                      Haz clic o arrastra un archivo aquí para adjuntar la factura o recibo
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      Guardaremos la imagen/documento para tus declaraciones de IRPF y revisiones de Hacienda
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center space-x-3 overflow-hidden min-w-0">
+                    {receiptType?.startsWith("image/") || receiptUrl.startsWith("data:image/") ? (
+                      <div className="w-12 h-12 rounded-lg bg-slate-800 border border-slate-700 overflow-hidden shrink-0 flex items-center justify-center relative">
+                        <img src={receiptUrl} alt="Vista previa" className="w-full h-full object-cover" />
+                      </div>
+                    ) : (
+                      <div className="w-12 h-12 rounded-lg bg-indigo-950/50 border border-indigo-500/30 text-indigo-400 flex items-center justify-center shrink-0">
+                        <FileText className="w-6 h-6" />
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-white truncate">{receiptName || "Comprobante_adjunto"}</p>
+                      <p className="text-[10px] font-mono text-emerald-400 flex items-center gap-1 mt-0.5">
+                        <Check className="w-3 h-3" /> Archivo preparado para guardar
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedReceiptExpense({
+                          id: 'draft',
+                          propertyId: propertyId || 'draft',
+                          category: opType === 'ingreso' ? 'rent' : category,
+                          type: opType,
+                          amount: parseFloat(amount) || 0,
+                          date: date || new Date().toISOString().split('T')[0],
+                          description: description || 'Vista previa del comprobante',
+                          receiptUrl,
+                          receiptName,
+                          receiptType
+                        });
+                      }}
+                      className="p-1.5 text-slate-300 hover:text-indigo-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors text-xs font-medium flex items-center gap-1 cursor-pointer"
+                      title="Ver vista previa"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Ver</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRemoveReceipt}
+                      className="p-1.5 text-slate-400 hover:text-red-400 bg-slate-800 hover:bg-red-950/30 rounded-lg transition-colors cursor-pointer"
+                      title="Eliminar archivo"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
           </div>
 
           <div className="mt-8 flex justify-end space-x-3 border-t border-slate-800 pt-5">
@@ -762,6 +930,7 @@ export default function Expenses({
                     <th className="py-3 px-3">Inmueble</th>
                     <th className="py-3 px-3">Clasificación AEAT</th>
                     <th className="py-3 px-3">Descripción / Concepto</th>
+                    <th className="py-3 px-3 text-center">Comprobante AEAT</th>
                     <th className="py-3 px-3 text-right">Dirección</th>
                     <th className="py-3 px-3 text-right">Importe</th>
                     <th className="py-3 px-3 text-center">Acciones</th>
@@ -792,6 +961,33 @@ export default function Expenses({
                           </td>
                           <td className="py-3.5 px-3 text-slate-400 italic font-normal max-w-xs truncate">
                             {exp.description || "-"}
+                          </td>
+                          <td className="py-3.5 px-3 text-center">
+                            {exp.receiptUrl ? (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedReceiptExpense(exp)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 font-bold text-[10px] transition-all cursor-pointer shadow-sm hover:scale-105"
+                                title="Consultar o descargar justificante / factura"
+                              >
+                                <Eye className="w-3 h-3 shrink-0" />
+                                <span>Ver Factura</span>
+                              </button>
+                            ) : (
+                              <label
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700/60 font-medium text-[10px] transition-colors cursor-pointer"
+                                title="Adjuntar factura o recibo a esta operación"
+                              >
+                                <Paperclip className="w-3 h-3 text-slate-500" />
+                                <span>Adjuntar</span>
+                                <input
+                                  type="file"
+                                  accept="image/*,.pdf,application/pdf"
+                                  className="hidden"
+                                  onChange={(e) => handleDirectAttachReceipt(exp.id, e)}
+                                />
+                              </label>
+                            )}
                           </td>
                           <td className="py-3.5 px-3 text-right whitespace-nowrap font-mono">
                             {isIncome ? (
@@ -1129,6 +1325,151 @@ export default function Expenses({
                 Confirmar Importación ({importPreviewData?.length || 0})
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* RECEIPT VIEWER & DOWNLOAD MODAL */}
+      {selectedReceiptExpense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-left">
+            
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/80">
+              <div className="flex items-center space-x-2.5">
+                <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-xl border border-indigo-500/20">
+                  <Receipt className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Comprobante Fiscal / Factura (AEAT)</h3>
+                  <p className="text-[11px] text-slate-400">
+                    {selectedReceiptExpense.receiptName || "Justificante_Transaccion"}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedReceiptExpense(null)}
+                className="p-1.5 text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Transaction Metadata Bar */}
+            <div className="bg-slate-950/70 border-b border-slate-800 px-6 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-sans">
+              <div>
+                <span className="text-[10px] text-slate-500 font-mono uppercase block">Inmueble</span>
+                <span className="font-semibold text-slate-200 truncate block">
+                  {properties.find(p => p.id === selectedReceiptExpense.propertyId)?.address.split(",")[0] || "Inmueble"}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 font-mono uppercase block">Fecha</span>
+                <span className="font-semibold text-slate-200 font-mono block">
+                  {new Date(selectedReceiptExpense.date).toLocaleDateString("es-ES")}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 font-mono uppercase block">Categoría</span>
+                <span className="font-semibold text-indigo-300 block truncate">
+                  {categories[selectedReceiptExpense.category]?.label || selectedReceiptExpense.category}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 font-mono uppercase block">Importe</span>
+                <span className={`font-bold font-mono text-sm block ${
+                  (selectedReceiptExpense.category === 'rent' || selectedReceiptExpense.type === 'ingreso')
+                    ? 'text-emerald-400'
+                    : 'text-rose-400'
+                }`}>
+                  {selectedReceiptExpense.amount.toLocaleString("es-ES")} €
+                </span>
+              </div>
+            </div>
+
+            {/* Document / Image Preview Body */}
+            <div className="p-6 overflow-y-auto flex-1 bg-slate-950/40 flex items-center justify-center min-h-[300px]">
+              {selectedReceiptExpense.receiptUrl ? (
+                selectedReceiptExpense.receiptType?.startsWith("image/") || selectedReceiptExpense.receiptUrl.startsWith("data:image/") ? (
+                  <div className="flex flex-col items-center max-w-full space-y-2">
+                    <img
+                      src={selectedReceiptExpense.receiptUrl}
+                      alt={selectedReceiptExpense.receiptName || "Comprobante de factura"}
+                      className="max-h-[55vh] max-w-full object-contain rounded-xl border border-slate-700 shadow-2xl bg-black/40"
+                    />
+                  </div>
+                ) : selectedReceiptExpense.receiptType === "application/pdf" || selectedReceiptExpense.receiptUrl.startsWith("data:application/pdf") ? (
+                  <div className="w-full h-[55vh] rounded-xl overflow-hidden border border-slate-700 bg-slate-900">
+                    <iframe
+                      src={selectedReceiptExpense.receiptUrl}
+                      title="Vista previa PDF"
+                      className="w-full h-full border-0"
+                    />
+                  </div>
+                ) : (
+                  <div className="text-center py-12 space-y-4">
+                    <FileText className="w-16 h-16 text-indigo-400 mx-auto" />
+                    <p className="text-xs text-slate-300">Vista previa no disponible directamente para este formato.</p>
+                  </div>
+                )
+              ) : (
+                <div className="text-center py-12 text-slate-500 text-xs">
+                  Sin comprobante adjunto.
+                </div>
+              )}
+            </div>
+
+            {/* Footer Actions */}
+            <div className="p-4 border-t border-slate-800 bg-slate-900 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center space-x-2">
+                {selectedReceiptExpense.id !== 'draft' && (
+                  <label
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                    title="Sustituir por un nuevo archivo"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Cambiar Archivo</span>
+                    <input
+                      type="file"
+                      accept="image/*,.pdf,application/pdf"
+                      className="hidden"
+                      onChange={(e) => {
+                        handleDirectAttachReceipt(selectedReceiptExpense.id, e);
+                        setSelectedReceiptExpense(null);
+                      }}
+                    />
+                  </label>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedReceiptExpense(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-xs transition-colors cursor-pointer"
+                >
+                  Cerrar
+                </button>
+
+                {selectedReceiptExpense.receiptUrl && (
+                  <a
+                    href={selectedReceiptExpense.receiptUrl}
+                    download={
+                      selectedReceiptExpense.receiptName ||
+                      `factura_${selectedReceiptExpense.date}_${selectedReceiptExpense.amount}eur.${
+                        selectedReceiptExpense.receiptType?.includes('pdf') ? 'pdf' : 'png'
+                      }`
+                    }
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs transition-all cursor-pointer flex items-center gap-2 shadow-lg shadow-indigo-600/20"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Descargar para AEAT / Hacienda</span>
+                  </a>
+                )}
+              </div>
+            </div>
+
           </div>
         </div>
       )}
