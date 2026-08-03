@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import * as XLSX from "xlsx";
 import { 
@@ -44,6 +44,7 @@ interface ExpensesProps {
   onDeleteExpense: (id: string) => void;
   onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
   user1Name: string;
+  currentYear?: number;
 }
 
 export default function Expenses({
@@ -52,13 +53,15 @@ export default function Expenses({
   onAddExpense,
   onDeleteExpense,
   onImportExpenses,
-  user1Name
+  user1Name,
+  currentYear = 2026
 }: ExpensesProps) {
   const [activeSubTab, setActiveSubTab] = useState<"ledger" | "amortization" | "analysis">("ledger");
   const [isAdding, setIsAdding] = useState(false);
   const [filterProperty, setFilterProperty] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterType, setFilterType] = useState<"all" | "gasto" | "ingreso">("all");
+  const [filterYear, setFilterYear] = useState<string>("all");
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // Import / Export states
@@ -423,6 +426,34 @@ export default function Expenses({
     setTimeout(() => setAmortNotification(null), 5000);
   };
 
+  // Maximum 5 years in dropdown selector as per AEAT / Commercial Code view
+  const availableYears = Array.from({ length: 5 }, (_, i) => currentYear - i);
+
+  // Automatic 6-year retention purge policy (Art. 30 C.Comercio)
+  // Records older than 6 years (e.g., in 2033, 2026 records are 7 years old and purged) are automatically deleted
+  const [purgedCount, setPurgedCount] = useState<number>(0);
+
+  useEffect(() => {
+    const expiredList = expenses.filter(exp => {
+      const expYear = parseInt(exp.date.split('-')[0], 10);
+      return !isNaN(expYear) && (currentYear - expYear) > 6;
+    });
+
+    if (expiredList.length > 0) {
+      const validExpenses = expenses.filter(exp => {
+        const expYear = parseInt(exp.date.split('-')[0], 10);
+        return isNaN(expYear) || (currentYear - expYear) <= 6;
+      });
+
+      setPurgedCount(prev => prev + expiredList.length);
+      if (onImportExpenses) {
+        onImportExpenses(validExpenses, 'replace');
+      } else {
+        expiredList.forEach(exp => onDeleteExpense(exp.id));
+      }
+    }
+  }, [expenses, currentYear]);
+
   // Filtered list
   const filteredExpenses = expenses.filter(exp => {
     const matchProp = filterProperty === "all" || exp.propertyId === filterProperty;
@@ -433,7 +464,10 @@ export default function Expenses({
     const currentType = isIncome ? 'ingreso' : 'gasto';
     const matchType = filterType === "all" || currentType === filterType;
 
-    return matchProp && matchCat && matchType;
+    // Check year filter
+    const matchYear = filterYear === "all" || exp.date.startsWith(filterYear);
+
+    return matchProp && matchCat && matchType && matchYear;
   });
 
   // Financial summary
@@ -911,7 +945,38 @@ export default function Expenses({
                   ))}
                 </select>
               </div>
+
+              {/* Filter: Year (Max 5 ejercicios) */}
+              <div>
+                <select
+                  value={filterYear}
+                  onChange={(e) => setFilterYear(e.target.value)}
+                  className="bg-slate-900 border border-indigo-500/40 rounded-xl px-3 py-2 text-[11px] font-bold text-indigo-300 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 cursor-pointer"
+                >
+                  <option value="all">Año: Todos (Máx 5 Ejercicios)</option>
+                  {availableYears.map((yr) => (
+                    <option key={yr} value={yr.toString()}>
+                      Año: {yr}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
+          </div>
+
+          {/* Retention & Auto-Purge Banner (Art. 30 C.Comercio - 6 años) */}
+          <div className="mb-4 bg-slate-900/60 border border-slate-800 rounded-xl px-3.5 py-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center space-x-2 text-slate-400">
+              <Calendar className="w-4 h-4 text-indigo-400 shrink-0" />
+              <span>
+                <strong className="text-slate-200 font-semibold">Regla de Conservación AEAT / Mercantil (6 años):</strong> Los registros con más de 6 años se purgan automáticamente (ej. en {currentYear + 7} se eliminan los de {currentYear + 1}).
+              </span>
+            </div>
+            {purgedCount > 0 && (
+              <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-md font-mono text-[10px] font-bold">
+                {purgedCount} registros antiguos purgados
+              </span>
+            )}
           </div>
 
           {/* List Table */}

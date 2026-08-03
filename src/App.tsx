@@ -1008,6 +1008,7 @@ export default function App() {
             onDeleteExpense={handleDeleteExpense}
             onImportExpenses={handleImportExpenses}
             user1Name={state.user1.name}
+            currentYear={state.currentYear || 2026}
           />
         )}
 
