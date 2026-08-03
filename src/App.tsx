@@ -9,7 +9,7 @@ import AuthScreen from "./components/AuthScreen";
 import Expenses from "./components/Expenses";
 import ContractCreator from "./components/ContractCreator";
 import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, getThemeColors } from "./types";
-import { db, doc, getDoc, setDoc, onSnapshot } from "./lib/firebase";
+import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
 import { 
   Menu, 
   ChevronDown, 
@@ -142,23 +142,27 @@ export default function App() {
 
         // Asynchronously persist to Firebase Firestore
         try {
+          const path = `users/${next.currentUser}/data/portfolio`;
           const userDocRef = doc(db, "users", next.currentUser, "data", "portfolio");
-          setDoc(userDocRef, {
-            user1: next.user1,
-            user2: next.user2,
-            properties: next.properties || [],
-            payments: next.payments || [],
-            expenses: next.expenses || [],
-            contracts: next.contracts || [],
-            syncEvents: next.syncEvents || [],
-            syncEnabled: next.syncEnabled,
-            isOnboarded: next.isOnboarded,
-            currentYear: next.currentYear || 2026,
-            yearlyProfiles: next.yearlyProfiles || {},
-            theme: next.theme || "slate-indigo",
-            updatedAt: new Date().toISOString()
-          }, { merge: true }).catch((err) => {
-            console.error("Firestore persistence error:", err);
+          const payload = JSON.parse(
+            JSON.stringify({
+              user1: next.user1,
+              user2: next.user2,
+              properties: next.properties || [],
+              payments: next.payments || [],
+              expenses: next.expenses || [],
+              contracts: next.contracts || [],
+              syncEvents: next.syncEvents || [],
+              syncEnabled: next.syncEnabled ?? true,
+              isOnboarded: next.isOnboarded ?? true,
+              currentYear: next.currentYear || 2026,
+              yearlyProfiles: next.yearlyProfiles || {},
+              theme: next.theme || "slate-indigo",
+              updatedAt: new Date().toISOString()
+            })
+          );
+          setDoc(userDocRef, payload, { merge: true }).catch((err) => {
+            handleFirestoreError(err, OperationType.WRITE, path);
           });
         } catch (e) {
           console.error("Firestore save error:", e);
@@ -174,6 +178,7 @@ export default function App() {
   useEffect(() => {
     if (!state.isAuthenticated || !state.currentUser) return;
 
+    const path = `users/${state.currentUser}/data/portfolio`;
     const userDocRef = doc(db, "users", state.currentUser, "data", "portfolio");
 
     // Initial fetch from Firestore
@@ -195,7 +200,7 @@ export default function App() {
         }));
       }
     }).catch((err) => {
-      console.warn("Firestore sync fetch warning:", err);
+      handleFirestoreError(err, OperationType.GET, path);
     });
 
     // Subscribe to real-time updates
@@ -214,7 +219,7 @@ export default function App() {
         }));
       }
     }, (err) => {
-      console.warn("Firestore real-time subscription error:", err);
+      handleFirestoreError(err, OperationType.GET, path);
     });
 
     return () => unsubscribe();
@@ -547,6 +552,96 @@ export default function App() {
       `Gasto de ${expense.amount}€ eliminado`,
       `Se ha eliminado el gasto de ${expense.amount}€ y actualizado la base imponible deducible.`
     );
+  };
+
+  // BULK IMPORT EXPENSES & INCOMES
+  const handleImportExpenses = (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => {
+    updateState((prev) => {
+      let finalExpenses: PropertyExpense[];
+      if (mode === 'replace') {
+        finalExpenses = newExpenses;
+      } else {
+        const existingIds = new Set((prev.expenses || []).map(e => e.id));
+        const deduplicatedNew = newExpenses.map(e => {
+          if (existingIds.has(e.id)) {
+            return { ...e, id: `exp_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
+          }
+          return e;
+        });
+        finalExpenses = [...(prev.expenses || []), ...deduplicatedNew];
+      }
+
+      return {
+        ...prev,
+        expenses: finalExpenses
+      };
+    });
+
+    addSyncEvent(
+      "Gestión de Gastos",
+      "Perfil & Firestore Cloud",
+      `Importadas ${newExpenses.length} operaciones`,
+      `Se han integrado masivamente ${newExpenses.length} gastos/ingresos en el perfil activo.`
+    );
+
+    triggerNotification(`📥 ¡${newExpenses.length} operaciones contables importadas con éxito!`);
+  };
+
+  // BULK IMPORT PROPERTIES
+  const handleImportProperties = (newProps: Property[], mode: 'merge' | 'replace') => {
+    updateState((prev) => {
+      let finalProps: Property[];
+      if (mode === 'replace') {
+        finalProps = newProps;
+      } else {
+        const existingIds = new Set(prev.properties.map(p => p.id));
+        const existingRefs = new Set(prev.properties.map(p => p.cadastralReference).filter(Boolean));
+
+        const deduplicatedNew = newProps.map(p => {
+          if (existingIds.has(p.id) || (p.cadastralReference && existingRefs.has(p.cadastralReference))) {
+            return { ...p, id: `prop_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
+          }
+          return p;
+        });
+        finalProps = [...prev.properties, ...deduplicatedNew];
+      }
+
+      // Generate clean payment schedules for 2026 for imported properties that don't have them yet
+      const currentYear = prev.currentYear || 2026;
+      const existingPaymentKeys = new Set(prev.payments.map(pay => `${pay.propertyId}_${pay.month}_${pay.year}`));
+      const newPayments: RentPayment[] = [];
+
+      finalProps.forEach(prop => {
+        MONTHS.forEach(m => {
+          const key = `${prop.id}_${m}_${currentYear}`;
+          if (!existingPaymentKeys.has(key)) {
+            newPayments.push({
+              id: `pay_${prop.id}_${m}_${currentYear}`,
+              propertyId: prop.id,
+              month: m,
+              year: currentYear,
+              amount: prop.monthlyRent || 0,
+              status: 'pending'
+            });
+          }
+        });
+      });
+
+      return {
+        ...prev,
+        properties: finalProps,
+        payments: [...prev.payments, ...newPayments]
+      };
+    });
+
+    addSyncEvent(
+      "Cartera Inmuebles",
+      "Perfil & Firestore Cloud",
+      `Importados ${newProps.length} inmuebles`,
+      `Se han integrado masivamente ${newProps.length} inmuebles en el perfil activo.`
+    );
+
+    triggerNotification(`🏢 ¡${newProps.length} inmuebles importados con éxito!`);
   };
 
   const handleUpdateCurrentYear = (year: number) => {
@@ -896,6 +991,7 @@ export default function App() {
             onEditProperty={handleEditProperty}
             onDeleteProperty={handleDeleteProperty}
             onDeleteExpense={handleDeleteExpense}
+            onImportProperties={handleImportProperties}
             user1Name={state.user1.name}
             user2Name={state.user2.name}
             hasPartner={state.user2.hasPartner}
@@ -910,6 +1006,7 @@ export default function App() {
             expenses={state.expenses || []} 
             onAddExpense={handleAddExpense}
             onDeleteExpense={handleDeleteExpense}
+            onImportExpenses={handleImportExpenses}
             user1Name={state.user1.name}
           />
         )}

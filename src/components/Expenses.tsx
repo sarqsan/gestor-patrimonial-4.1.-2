@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Property, PropertyExpense } from "../types";
+import * as XLSX from "xlsx";
 import { 
   Building, 
   Plus, 
@@ -23,7 +24,13 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
   PieChart as ChartIcon,
-  BookOpen
+  BookOpen,
+  Download,
+  Upload,
+  FileSpreadsheet,
+  FileCode,
+  X,
+  AlertCircle
 } from "lucide-react";
 
 interface ExpensesProps {
@@ -31,6 +38,7 @@ interface ExpensesProps {
   expenses: PropertyExpense[];
   onAddExpense: (newExpense: PropertyExpense) => void;
   onDeleteExpense: (id: string) => void;
+  onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
   user1Name: string;
 }
 
@@ -39,6 +47,7 @@ export default function Expenses({
   expenses = [],
   onAddExpense,
   onDeleteExpense,
+  onImportExpenses,
   user1Name
 }: ExpensesProps) {
   const [activeSubTab, setActiveSubTab] = useState<"ledger" | "amortization" | "analysis">("ledger");
@@ -47,6 +56,14 @@ export default function Expenses({
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterType, setFilterType] = useState<"all" | "gasto" | "ingreso">("all");
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  // Import / Export states
+  const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importPreviewData, setImportPreviewData] = useState<PropertyExpense[] | null>(null);
+  const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
 
   // Form states
   const [propertyId, setPropertyId] = useState("");
@@ -57,6 +74,178 @@ export default function Expenses({
   const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [amortNotification, setAmortNotification] = useState<{ text: string; isError: boolean } | null>(null);
+
+  // Export handlers
+  const handleExportJSON = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(expenses, null, 2));
+    const dlAnchor = document.createElement("a");
+    dlAnchor.setAttribute("href", dataStr);
+    dlAnchor.setAttribute("download", `gastos_e_ingresos_rentasync_${new Date().toISOString().split("T")[0]}.json`);
+    document.body.appendChild(dlAnchor);
+    dlAnchor.click();
+    dlAnchor.remove();
+    setIsExportOpen(false);
+  };
+
+  const handleExportExcel = () => {
+    const propMap = new Map(properties.map((p) => [p.id, p.address]));
+    const rows = expenses.map((e) => ({
+      "ID Transacción": e.id,
+      "ID Inmueble": e.propertyId,
+      "Inmueble / Dirección": propMap.get(e.propertyId) || e.propertyId,
+      "Tipo Registro": e.type || (e.category === "rent" ? "ingreso" : "gasto"),
+      "Categoría Fiscal": e.category,
+      "Importe (€)": e.amount,
+      "Fecha": e.date,
+      "Descripción / Concepto": e.description || ""
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Gastos e Ingresos");
+    XLSX.writeFile(workbook, `gastos_e_ingresos_${new Date().toISOString().split("T")[0]}.xlsx`);
+    setIsExportOpen(false);
+  };
+
+  // Import handler
+  const handleProcessImportFile = (file: File) => {
+    setImportError(null);
+    setImportSuccessMsg(null);
+    const isJson = file.name.toLowerCase().endsWith(".json");
+    const reader = new FileReader();
+
+    if (isJson) {
+      reader.onload = (e) => {
+        try {
+          const parsed = JSON.parse(e.target?.result as string);
+          
+          let rawArray: any[] | null = null;
+          if (Array.isArray(parsed)) {
+            rawArray = parsed;
+          } else if (parsed && typeof parsed === "object") {
+            if (Array.isArray(parsed.expenses)) {
+              rawArray = parsed.expenses;
+            } else if (Array.isArray(parsed.gastos)) {
+              rawArray = parsed.gastos;
+            } else if (Array.isArray(parsed.ingresos)) {
+              rawArray = parsed.ingresos;
+            } else if (Array.isArray(parsed.transacciones)) {
+              rawArray = parsed.transacciones;
+            } else if (Array.isArray(parsed.data?.expenses)) {
+              rawArray = parsed.data.expenses;
+            } else if (Array.isArray(parsed.portfolio?.expenses)) {
+              rawArray = parsed.portfolio.expenses;
+            } else if (Array.isArray(parsed.state?.expenses)) {
+              rawArray = parsed.state.expenses;
+            } else if (Array.isArray(parsed.data)) {
+              rawArray = parsed.data;
+            } else if (Array.isArray(parsed.items)) {
+              rawArray = parsed.items;
+            } else if (parsed.amount || parsed.Importe || parsed.category) {
+              rawArray = [parsed];
+            } else {
+              const candidateKey = Object.keys(parsed).find(k => 
+                Array.isArray(parsed[k]) && parsed[k].length > 0 && 
+                (parsed[k][0]?.amount !== undefined || parsed[k][0]?.Importe !== undefined || parsed[k][0]?.category)
+              );
+              if (candidateKey) {
+                rawArray = parsed[candidateKey];
+              }
+            }
+          }
+
+          if (rawArray && Array.isArray(rawArray)) {
+            const validExpenses: PropertyExpense[] = rawArray.map((item: any, idx: number) => {
+              const rawCat = item.category || (item.type === "ingreso" || item.Tipo === "ingreso" ? "rent" : "other");
+              const rawTypeStr = String(item.type || item.type_op || item.Tipo || (rawCat === "rent" ? "ingreso" : "gasto")).toLowerCase();
+              const finalType: "gasto" | "ingreso" = (rawTypeStr === "ingreso" || rawCat === "rent") ? "ingreso" : "gasto";
+
+              return {
+                id: String(item.id || `exp_imp_${Date.now()}_${idx}`),
+                propertyId: String(item.propertyId || item.property_id || properties[0]?.id || "prop_1"),
+                category: rawCat as any,
+                type: finalType,
+                amount: Number(item.amount || item.Importe || 0),
+                date: String(item.date || item.Fecha || new Date().toISOString().split("T")[0]),
+                description: item.description || item.descripcion || item.Descripcion || undefined
+              };
+            }).filter(item => item.amount > 0);
+
+            if (validExpenses.length === 0) {
+              setImportError("No se han encontrado registros válidos de gastos o ingresos en el archivo.");
+              setImportPreviewData(null);
+            } else {
+              setImportPreviewData(validExpenses);
+            }
+          } else {
+            setImportError("No se ha encontrado un listado de gastos/ingresos en el archivo JSON. Asegúrate de que el archivo exportado contenga operaciones contables.");
+            setImportPreviewData(null);
+          }
+        } catch (err) {
+          setImportError("Error al leer el archivo JSON. Asegúrate de que tenga un formato correcto.");
+          setImportPreviewData(null);
+        }
+      };
+      reader.readAsText(file);
+    } else {
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheetName = workbook.SheetNames[0];
+          const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+          const validExpenses: PropertyExpense[] = rows.map((item: any, idx: number) => {
+            const rawAmount = item["Importe (€)"] || item["Importe"] || item["amount"] || item["Importe_EUR"] || 0;
+            const rawDate = item["Fecha"] || item["date"] || new Date().toISOString().split("T")[0];
+            const rawCat = item["Categoría Fiscal"] || item["category"] || item["Categoría"] || "other";
+            const rawTypeStr = String(item["Tipo Registro"] || item["type"] || item["Tipo"] || (rawCat === "rent" ? "ingreso" : "gasto")).toLowerCase();
+            const finalType: "gasto" | "ingreso" = (rawTypeStr === "ingreso" || rawCat === "rent") ? "ingreso" : "gasto";
+            const rawPropId = item["ID Inmueble"] || item["propertyId"] || properties[0]?.id || "prop_1";
+
+            return {
+              id: String(item["ID Transacción"] || item["id"] || `exp_imp_${Date.now()}_${idx}`),
+              propertyId: String(rawPropId),
+              category: rawCat as any,
+              type: finalType,
+              amount: Number(rawAmount) || 0,
+              date: String(rawDate),
+              description: item["Descripción / Concepto"] || item["description"] || item["Descripción"] || undefined
+            };
+          }).filter(item => item.amount > 0);
+
+          if (validExpenses.length === 0) {
+            setImportError("No se han encontrado filas con importes válidos en la hoja de cálculo.");
+            setImportPreviewData(null);
+          } else {
+            setImportPreviewData(validExpenses);
+          }
+        } catch (err) {
+          setImportError("Error al procesar la hoja de cálculo. Comprueba que sea un archivo Excel (.xlsx, .xls) o CSV válido.");
+          setImportPreviewData(null);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  const handleConfirmImport = () => {
+    if (!importPreviewData || importPreviewData.length === 0) return;
+    if (onImportExpenses) {
+      onImportExpenses(importPreviewData, importMode);
+      setImportSuccessMsg(`Se han importado con éxito ${importPreviewData.length} registros contables.`);
+      setTimeout(() => {
+        setIsImportOpen(false);
+        setImportPreviewData(null);
+        setImportSuccessMsg(null);
+      }, 1200);
+    } else {
+      // Fallback: add items one by one
+      importPreviewData.forEach(exp => onAddExpense(exp));
+      setIsImportOpen(false);
+      setImportPreviewData(null);
+    }
+  };
 
   const resetForm = () => {
     setPropertyId(properties[0]?.id || "");
@@ -196,13 +385,71 @@ export default function Expenses({
           </p>
         </div>
         {!isAdding && (
-          <button
-            onClick={handleStartAdd}
-            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition-all cursor-pointer text-xs shadow-lg shadow-indigo-600/15 hover:-translate-y-0.5"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            <span>Registrar Transacción</span>
-          </button>
+          <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-2">
+            {/* EXPORT BUTTON & DROPDOWN */}
+            <div className="relative">
+              <button
+                onClick={() => setIsExportOpen(!isExportOpen)}
+                className="inline-flex items-center px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+                title="Exportar gastos e ingresos"
+              >
+                <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
+                <span>Exportar</span>
+              </button>
+
+              {isExportOpen && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setIsExportOpen(false)}></div>
+                  <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-2 z-40 text-xs">
+                    <button
+                      onClick={handleExportJSON}
+                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
+                    >
+                      <FileCode className="w-4 h-4 text-emerald-400" />
+                      <div>
+                        <div className="font-semibold">Exportar JSON</div>
+                        <div className="text-[10px] text-slate-400">Para pasar a otro perfil en la App</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={handleExportExcel}
+                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-indigo-400" />
+                      <div>
+                        <div className="font-semibold">Exportar Excel (.xlsx)</div>
+                        <div className="text-[10px] text-slate-400">Para abrir en Excel o Google Sheets</div>
+                      </div>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* IMPORT BUTTON */}
+            <button
+              onClick={() => {
+                setIsImportOpen(true);
+                setImportPreviewData(null);
+                setImportError(null);
+                setImportSuccessMsg(null);
+              }}
+              className="inline-flex items-center px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+              title="Importar gastos e ingresos"
+            >
+              <Upload className="w-4 h-4 mr-1.5 text-amber-400" />
+              <span>Importar</span>
+            </button>
+
+            {/* ADD TRANSACTION BUTTON */}
+            <button
+              onClick={handleStartAdd}
+              className="inline-flex items-center px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition-all cursor-pointer text-xs shadow-lg shadow-indigo-600/15 hover:-translate-y-0.5"
+            >
+              <Plus className="w-4 h-4 mr-1.5" />
+              <span>Registrar Transacción</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -753,6 +1000,136 @@ export default function Expenses({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* IMPORT MODAL */}
+      {isImportOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl animate-scale-up">
+            <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-800/40">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl border border-amber-500/20">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Importar Gastos e Ingresos</h3>
+                  <p className="text-xs text-slate-400">Sube un archivo JSON o Excel (.xlsx) exportado de otro perfil</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsImportOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              {/* FILE UPLOADER */}
+              <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/50 rounded-2xl p-6 text-center transition-colors bg-slate-950/40">
+                <input
+                  type="file"
+                  id="expenses-import-file"
+                  accept=".json,.xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleProcessImportFile(file);
+                  }}
+                />
+                <label
+                  htmlFor="expenses-import-file"
+                  className="cursor-pointer flex flex-col items-center gap-2"
+                >
+                  <div className="p-3 bg-slate-800 rounded-xl text-amber-400">
+                    <FileSpreadsheet className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <span className="font-semibold text-white text-sm hover:underline">Haz clic para seleccionar archivo</span>
+                    <p className="text-xs text-slate-400 mt-1">Soporta archivos JSON, Excel (.xlsx, .xls) y CSV</p>
+                  </div>
+                </label>
+              </div>
+
+              {/* ERROR MESSAGE */}
+              {importError && (
+                <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-300 rounded-xl text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{importError}</span>
+                </div>
+              )}
+
+              {/* SUCCESS MESSAGE */}
+              {importSuccessMsg && (
+                <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>{importSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* PREVIEW & MODE CHOICE */}
+              {importPreviewData && importPreviewData.length > 0 && (
+                <div className="space-y-4 pt-2">
+                  <div className="p-3.5 bg-indigo-950/40 border border-indigo-500/30 rounded-xl flex justify-between items-center text-xs">
+                    <span className="text-indigo-200 font-medium">Registros detectados en el archivo:</span>
+                    <span className="bg-indigo-500/20 text-indigo-300 font-bold px-2.5 py-1 rounded-full border border-indigo-500/30">
+                      {importPreviewData.length} elementos
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-300 block">Modo de Importación:</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('merge')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          importMode === 'merge'
+                            ? 'bg-amber-500/10 border-amber-500/50 text-amber-300 font-bold'
+                            : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="text-xs">➕ Fusionar (Añadir)</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">Mantiene los registros actuales</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('replace')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          importMode === 'replace'
+                            ? 'bg-red-500/10 border-red-500/50 text-red-300 font-bold'
+                            : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="text-xs">🔄 Reemplazar todo</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">Sustituye los datos del perfil</div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-800/40 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsImportOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl text-xs transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmImport}
+                disabled={!importPreviewData || importPreviewData.length === 0}
+                className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20"
+              >
+                Confirmar Importación ({importPreviewData?.length || 0})
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
+import * as XLSX from "xlsx";
 import { 
   Building, 
   User, 
@@ -17,6 +18,9 @@ import {
   AlertCircle,
   FileText,
   Upload,
+  Download,
+  FileSpreadsheet,
+  FileCode,
   Calendar,
   Sparkles,
   Loader2,
@@ -29,6 +33,7 @@ interface PropertiesProps {
   onEditProperty: (updatedProperty: Property) => void;
   onDeleteProperty: (id: string) => void;
   onDeleteExpense: (id: string) => void;
+  onImportProperties?: (newProperties: Property[], mode: 'merge' | 'replace') => void;
   user1Name: string;
   user2Name: string;
   hasPartner: boolean;
@@ -42,6 +47,7 @@ export default function Properties({
   onEditProperty, 
   onDeleteProperty,
   onDeleteExpense,
+  onImportProperties,
   user1Name,
   user2Name,
   hasPartner,
@@ -58,6 +64,14 @@ export default function Properties({
   // New states for real estate performance metrics and document manager
   const [openFinancialsPropertyId, setOpenFinancialsPropertyId] = useState<string | null>(null);
   const [openDocsPropertyId, setOpenDocsPropertyId] = useState<string | null>(null);
+
+  // Import / Export states
+  const [isExportOpen, setIsExportOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importPreviewData, setImportPreviewData] = useState<Property[] | null>(null);
+  const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
   const [financialYear, setFinancialYear] = useState<number>(currentYear);
   const [docYear, setDocYear] = useState<number>(currentYear);
 
@@ -424,6 +438,199 @@ export default function Properties({
     resetForm();
   };
 
+  // Property Export handlers
+  const handleExportJSON = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(properties, null, 2));
+    const dlAnchor = document.createElement("a");
+    dlAnchor.setAttribute("href", dataStr);
+    dlAnchor.setAttribute("download", `inmuebles_rentasync_${new Date().toISOString().split("T")[0]}.json`);
+    document.body.appendChild(dlAnchor);
+    dlAnchor.click();
+    dlAnchor.remove();
+    setIsExportOpen(false);
+  };
+
+  const handleExportExcel = () => {
+    const rows = properties.map((p) => ({
+      "ID Inmueble": p.id,
+      "Dirección Completa": p.address,
+      "Referencia Catastral": p.cadastralReference || "",
+      "Titularidad": p.owner,
+      "% Propietario 1": p.ownershipPercentageUser1,
+      "% Propietario 2": p.ownershipPercentageUser2,
+      "Inquilino": p.tenantName || "",
+      "DNI Inquilino": p.tenantDni || "",
+      "Renta Mensual (€)": p.monthlyRent || 0,
+      "Precio Adquisición (€)": p.purchasePrice || 0,
+      "% Suelo Catastral": p.landValuePercent || 0,
+      "Amortización Anual (€)": p.amortizationAmount || 0,
+      "Gastos Comunidad (€)": p.expensesCommunity || 0,
+      "Gastos IBI (€)": p.expensesIBI || 0,
+      "Gastos Seguro (€)": p.expensesInsurance || 0,
+      "Gastos Reparaciones (€)": p.expensesRepairs || 0,
+      "Fecha Registro": p.registrationDate || ""
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Inmuebles");
+    XLSX.writeFile(workbook, `inmuebles_${new Date().toISOString().split("T")[0]}.xlsx`);
+    setIsExportOpen(false);
+  };
+
+  // Property Import handler
+  const handleProcessImportFile = (file: File) => {
+    setImportError(null);
+    setImportSuccessMsg(null);
+    const isJson = file.name.toLowerCase().endsWith(".json");
+    const reader = new FileReader();
+
+    if (isJson) {
+      reader.onload = (e) => {
+        try {
+          const parsed = JSON.parse(e.target?.result as string);
+          
+          let rawArray: any[] | null = null;
+          if (Array.isArray(parsed)) {
+            rawArray = parsed;
+          } else if (parsed && typeof parsed === "object") {
+            if (Array.isArray(parsed.properties)) {
+              rawArray = parsed.properties;
+            } else if (Array.isArray(parsed.inmuebles)) {
+              rawArray = parsed.inmuebles;
+            } else if (Array.isArray(parsed.data?.properties)) {
+              rawArray = parsed.data.properties;
+            } else if (Array.isArray(parsed.portfolio?.properties)) {
+              rawArray = parsed.portfolio.properties;
+            } else if (Array.isArray(parsed.state?.properties)) {
+              rawArray = parsed.state.properties;
+            } else if (Array.isArray(parsed.data)) {
+              rawArray = parsed.data;
+            } else if (Array.isArray(parsed.items)) {
+              rawArray = parsed.items;
+            } else if (parsed.address || parsed["Dirección Completa"] || parsed["Dirección"] || parsed["Direccion"]) {
+              rawArray = [parsed];
+            } else {
+              const candidateKey = Object.keys(parsed).find(k => 
+                Array.isArray(parsed[k]) && parsed[k].length > 0 && 
+                (parsed[k][0]?.address || parsed[k][0]?.["Dirección Completa"] || parsed[k][0]?.cadastralReference || parsed[k][0]?.monthlyRent)
+              );
+              if (candidateKey) {
+                rawArray = parsed[candidateKey];
+              }
+            }
+          }
+
+          if (rawArray && Array.isArray(rawArray)) {
+            const validProps: Property[] = rawArray.map((item: any, idx: number) => ({
+              id: item.id || `prop_imp_${Date.now()}_${idx}`,
+              address: String(item.address || item.Dirección || item["Dirección Completa"] || item.Direccion || "Sin Dirección"),
+              cadastralReference: String(item.cadastralReference || item["Referencia Catastral"] || item.refCatastral || ""),
+              owner: (item.owner === "user2" || item.owner === "joint") ? item.owner : "user1",
+              ownershipPercentageUser1: Number(item.ownershipPercentageUser1 ?? item["% Propietario 1"] ?? 100),
+              ownershipPercentageUser2: Number(item.ownershipPercentageUser2 ?? item["% Propietario 2"] ?? 0),
+              tenantName: String(item.tenantName || item["Inquilino"] || ""),
+              tenantDni: String(item.tenantDni || item["DNI Inquilino"] || ""),
+              monthlyRent: Number(item.monthlyRent ?? item["Renta Mensual (€)"] ?? item["Renta Mensual"] ?? 0),
+              purchasePrice: Number(item.purchasePrice ?? item["Precio Adquisición (€)"] ?? item["Precio Adquisicion"] ?? 0),
+              landValuePercent: Number(item.landValuePercent ?? item["% Suelo Catastral"] ?? 25),
+              amortizationAmount: Number(item.amortizationAmount ?? item["Amortización Anual (€)"] ?? 0),
+              expensesCommunity: Number(item.expensesCommunity ?? item["Gastos Comunidad (€)"] ?? 0),
+              expensesIBI: Number(item.expensesIBI ?? item["Gastos IBI (€)"] ?? 0),
+              expensesInsurance: Number(item.expensesInsurance ?? item["Gastos Seguro (€)"] ?? 0),
+              expensesRepairs: Number(item.expensesRepairs ?? item["Gastos Reparaciones (€)"] ?? 0),
+              registrationDate: String(item.registrationDate || item["Fecha Registro"] || new Date().toLocaleDateString('es-ES')),
+              contract: item.contract,
+              yearlyFinancials: item.yearlyFinancials,
+              documents: item.documents
+            })).filter(p => p.address && p.address !== "Sin Dirección");
+
+            if (validProps.length === 0) {
+              setImportError("No se han encontrado inmuebles con datos válidos en el archivo JSON.");
+              setImportPreviewData(null);
+            } else {
+              setImportPreviewData(validProps);
+            }
+          } else {
+            setImportError("No se ha encontrado un listado de inmuebles en el archivo JSON. Asegúrate de que el archivo exportado contenga los datos de los inmuebles.");
+            setImportPreviewData(null);
+          }
+        } catch (err) {
+          setImportError("Error al leer el archivo JSON de inmuebles. Comprueba que el formato sea correcto.");
+          setImportPreviewData(null);
+        }
+      };
+      reader.readAsText(file);
+    } else {
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheetName = workbook.SheetNames[0];
+          const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+          const validProps: Property[] = rows.map((item: any, idx: number) => {
+            const addr = item["Dirección Completa"] || item["Dirección"] || item["address"] || item["Direccion"] || "Sin Dirección";
+            const ref = item["Referencia Catastral"] || item["cadastralReference"] || item["Ref Catastral"] || "";
+            const ownerVal = item["Titularidad"] || item["Titular"] || item["owner"] || "user1";
+            const rent = item["Renta Mensual (€)"] || item["Renta Mensual"] || item["monthlyRent"] || 0;
+            const price = item["Precio Adquisición (€)"] || item["purchasePrice"] || 0;
+            const land = item["% Suelo Catastral"] || item["landValuePercent"] || 25;
+            const amort = item["Amortización Anual (€)"] || item["amortizationAmount"] || (price * (100 - land) / 100 * 0.03);
+
+            return {
+              id: item["ID Inmueble"] || item["id"] || `prop_imp_${Date.now()}_${idx}`,
+              address: String(addr),
+              cadastralReference: String(ref),
+              owner: ownerVal as any,
+              ownershipPercentageUser1: Number(item["% Propietario 1"] ?? item["ownershipPercentageUser1"] ?? 100),
+              ownershipPercentageUser2: Number(item["% Propietario 2"] ?? item["ownershipPercentageUser2"] ?? 0),
+              tenantName: String(item["Inquilino"] || item["tenantName"] || ""),
+              tenantDni: String(item["DNI Inquilino"] || item["tenantDni"] || ""),
+              monthlyRent: Number(rent) || 0,
+              purchasePrice: Number(price) || 0,
+              landValuePercent: Number(land) || 25,
+              amortizationAmount: Number(amort) || 0,
+              expensesCommunity: Number(item["Gastos Comunidad (€)"] || item["expensesCommunity"] || 0),
+              expensesIBI: Number(item["Gastos IBI (€)"] || item["expensesIBI"] || 0),
+              expensesInsurance: Number(item["Gastos Seguro (€)"] || item["expensesInsurance"] || 0),
+              expensesRepairs: Number(item["Gastos Reparaciones (€)"] || item["expensesRepairs"] || 0),
+              registrationDate: String(item["Fecha Registro"] || item["registrationDate"] || new Date().toLocaleDateString('es-ES'))
+            };
+          }).filter(p => p.address && p.address !== "Sin Dirección");
+
+          if (validProps.length === 0) {
+            setImportError("No se han encontrado filas con direcciones válidas en la hoja de cálculo.");
+            setImportPreviewData(null);
+          } else {
+            setImportPreviewData(validProps);
+          }
+        } catch (err) {
+          setImportError("Error al procesar la hoja de cálculo. Comprueba que sea un archivo Excel (.xlsx, .xls) o CSV válido.");
+          setImportPreviewData(null);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  const handleConfirmImport = () => {
+    if (!importPreviewData || importPreviewData.length === 0) return;
+    if (onImportProperties) {
+      onImportProperties(importPreviewData, importMode);
+      setImportSuccessMsg(`Se han importado con éxito ${importPreviewData.length} inmuebles.`);
+      setTimeout(() => {
+        setIsImportOpen(false);
+        setImportPreviewData(null);
+        setImportSuccessMsg(null);
+      }, 1200);
+    } else {
+      importPreviewData.forEach(p => onAddProperty(p));
+      setIsImportOpen(false);
+      setImportPreviewData(null);
+    }
+  };
+
   return (
     <div id="properties-tab" className="space-y-8 animate-fade-in text-slate-100">
       
@@ -436,13 +643,71 @@ export default function Properties({
           </p>
         </div>
         {!isAdding && !editingId && (
-          <button
-            onClick={() => { resetForm(); setIsAdding(true); }}
-            className="mt-4 sm:mt-0 inline-flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition-all cursor-pointer text-sm shadow-md shadow-indigo-600/10"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            Añadir Inmueble
-          </button>
+          <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-2">
+            {/* EXPORT BUTTON & DROPDOWN */}
+            <div className="relative">
+              <button
+                onClick={() => setIsExportOpen(!isExportOpen)}
+                className="inline-flex items-center px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+                title="Exportar inmuebles"
+              >
+                <Download className="w-4 h-4 mr-1.5 text-indigo-400" />
+                <span>Exportar</span>
+              </button>
+
+              {isExportOpen && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setIsExportOpen(false)}></div>
+                  <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-2 z-40 text-xs">
+                    <button
+                      onClick={handleExportJSON}
+                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
+                    >
+                      <FileCode className="w-4 h-4 text-emerald-400" />
+                      <div>
+                        <div className="font-semibold">Exportar JSON</div>
+                        <div className="text-[10px] text-slate-400">Para pasar a otro perfil en la App</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={handleExportExcel}
+                      className="w-full text-left px-4 py-2.5 hover:bg-slate-800 text-slate-200 flex items-center gap-2.5"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-indigo-400" />
+                      <div>
+                        <div className="font-semibold">Exportar Excel (.xlsx)</div>
+                        <div className="text-[10px] text-slate-400">Para abrir en Excel o Google Sheets</div>
+                      </div>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* IMPORT BUTTON */}
+            <button
+              onClick={() => {
+                setIsImportOpen(true);
+                setImportPreviewData(null);
+                setImportError(null);
+                setImportSuccessMsg(null);
+              }}
+              className="inline-flex items-center px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
+              title="Importar inmuebles"
+            >
+              <Upload className="w-4 h-4 mr-1.5 text-amber-400" />
+              <span>Importar</span>
+            </button>
+
+            {/* ADD PROPERTY BUTTON */}
+            <button
+              onClick={() => { resetForm(); setIsAdding(true); }}
+              className="inline-flex items-center px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition-all cursor-pointer text-xs shadow-md shadow-indigo-600/10"
+            >
+              <Plus className="w-4 h-4 mr-1.5" />
+              <span>Añadir Inmueble</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -1838,6 +2103,136 @@ export default function Properties({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* IMPORT MODAL */}
+      {isImportOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl animate-scale-up">
+            <div className="p-5 border-b border-slate-800 flex justify-between items-center bg-slate-800/40">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl border border-amber-500/20">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Importar Inmuebles</h3>
+                  <p className="text-xs text-slate-400">Sube un archivo JSON o Excel (.xlsx) de inmuebles</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsImportOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              {/* FILE UPLOADER */}
+              <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/50 rounded-2xl p-6 text-center transition-colors bg-slate-950/40">
+                <input
+                  type="file"
+                  id="properties-import-file"
+                  accept=".json,.xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleProcessImportFile(file);
+                  }}
+                />
+                <label
+                  htmlFor="properties-import-file"
+                  className="cursor-pointer flex flex-col items-center gap-2"
+                >
+                  <div className="p-3 bg-slate-800 rounded-xl text-amber-400">
+                    <FileSpreadsheet className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <span className="font-semibold text-white text-sm hover:underline">Haz clic para seleccionar archivo</span>
+                    <p className="text-xs text-slate-400 mt-1">Soporta archivos JSON, Excel (.xlsx, .xls) y CSV</p>
+                  </div>
+                </label>
+              </div>
+
+              {/* ERROR MESSAGE */}
+              {importError && (
+                <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-300 rounded-xl text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{importError}</span>
+                </div>
+              )}
+
+              {/* SUCCESS MESSAGE */}
+              {importSuccessMsg && (
+                <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>{importSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* PREVIEW & MODE CHOICE */}
+              {importPreviewData && importPreviewData.length > 0 && (
+                <div className="space-y-4 pt-2">
+                  <div className="p-3.5 bg-indigo-950/40 border border-indigo-500/30 rounded-xl flex justify-between items-center text-xs">
+                    <span className="text-indigo-200 font-medium">Inmuebles detectados en el archivo:</span>
+                    <span className="bg-indigo-500/20 text-indigo-300 font-bold px-2.5 py-1 rounded-full border border-indigo-500/30">
+                      {importPreviewData.length} inmuebles
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-300 block">Modo de Importación:</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('merge')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          importMode === 'merge'
+                            ? 'bg-amber-500/10 border-amber-500/50 text-amber-300 font-bold'
+                            : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="text-xs">➕ Fusionar (Añadir)</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">Mantiene los inmuebles actuales</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('replace')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          importMode === 'replace'
+                            ? 'bg-red-500/10 border-red-500/50 text-red-300 font-bold'
+                            : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="text-xs">🔄 Reemplazar todo</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">Sustituye la cartera actual</div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-800/40 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsImportOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl text-xs transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmImport}
+                disabled={!importPreviewData || importPreviewData.length === 0}
+                className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20"
+              >
+                Confirmar Importación ({importPreviewData?.length || 0})
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
