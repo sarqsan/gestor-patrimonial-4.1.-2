@@ -41,6 +41,7 @@ export interface PropertyYearlyFinancials {
   purchaseExpenses?: number; // total gastos operación compra
   mortgageDebt?: number; // capital pendiente de hipoteca
   monthlyMortgagePayment?: number; // cuota hipotecaria mensual
+  isManual?: boolean; // indica si la cifra fue introducida/modificada manualmente
 }
 
 export interface PropertyDocument {
@@ -65,6 +66,12 @@ export interface Property {
   tenantDni: string;
   monthlyRent: number;
   purchasePrice: number;
+  currentValue?: number; // valor actual de mercado general
+  mortgageDebt?: number; // capital pendiente de hipoteca general
+  monthlyMortgagePayment?: number; // cuota hipotecaria mensual general
+  mortgageInterestRate?: number; // tipo de interés nominal anual (%) general
+  mortgageStartDate?: string; // fecha de referencia / inicio hipoteca (YYYY-MM-DD)
+  mortgageTermYears?: number; // plazo total de hipoteca en años
   landValuePercent: number; // e.g. 30 for 30% land, 70% construction
   amortizationAmount: number; // standard 3% of construction value (purchasePrice * (100 - landValuePercent) / 100 * 0.03)
   expensesCommunity: number; // annual
@@ -334,4 +341,153 @@ export function getTenantActiveMonthsForYear(tenantRec: TenantContractRecord, ye
   }
 
   return activeMonths;
+}
+
+export interface EffectiveFinancials {
+  currentValue: number;
+  purchasePrice: number;
+  purchaseExpenses: number;
+  mortgageDebt: number;
+  monthlyMortgagePayment: number;
+  isManual?: boolean;
+  isMortgageCalculated?: boolean; // true si la hipoteca se ha proyectado dinámicamente por amortización
+}
+
+export function calculateAmortizedMortgageDebt(
+  initialDebt: number,
+  monthlyPayment: number,
+  annualInterestRate: number,
+  monthsElapsed: number
+): number {
+  if (initialDebt <= 0 || monthsElapsed <= 0) return Math.max(0, initialDebt);
+  if (annualInterestRate <= 0 || monthlyPayment <= 0) return Math.max(0, initialDebt);
+
+  const monthlyRate = annualInterestRate / 100 / 12;
+  let currentDebt = initialDebt;
+
+  for (let m = 0; m < monthsElapsed; m++) {
+    if (currentDebt <= 0) break;
+    const interestPayment = currentDebt * monthlyRate;
+    const principalPayment = monthlyPayment - interestPayment;
+    if (principalPayment <= 0) break;
+    currentDebt = Math.max(0, currentDebt - principalPayment);
+  }
+
+  return Math.round(currentDebt);
+}
+
+export function getEffectivePropertyFinancials(
+  prop: Property,
+  targetYear: number
+): EffectiveFinancials {
+  const purchasePrice = prop.purchasePrice || 0;
+  const defaultPurchaseExpenses = Math.round(purchasePrice * 0.10);
+
+  // Comprueba si un valor en un año parece una estimación automática de revalorización teórica
+  const isAutoEstimatedVal = (yr: number, val: number | undefined) => {
+    if (val === undefined || val === 0) return true;
+    const diff = Math.max(0, yr - 2025);
+    const estVal = Math.round(purchasePrice * Math.pow(1.035, diff));
+    return Math.abs(val - estVal) <= 1 || val === purchasePrice;
+  };
+
+  const isExplicitManualRecord = (fin: PropertyYearlyFinancials | undefined, yr: number): boolean => {
+    if (!fin) return false;
+    if (fin.isManual === true) return true;
+    if ((fin.mortgageDebt ?? 0) > 0 || (fin.monthlyMortgagePayment ?? 0) > 0) return true;
+    if (fin.currentValue !== undefined && fin.currentValue > 0 && !isAutoEstimatedVal(yr, fin.currentValue)) return true;
+    return false;
+  };
+
+  // 1. Determinar currentValue efectivo
+  let effectiveCurrentValue = prop.currentValue ?? purchasePrice;
+  const targetYearFin = prop.yearlyFinancials?.[targetYear];
+
+  if (targetYearFin && isExplicitManualRecord(targetYearFin, targetYear) && targetYearFin.currentValue) {
+    effectiveCurrentValue = targetYearFin.currentValue;
+  } else if (prop.yearlyFinancials) {
+    const years = Object.keys(prop.yearlyFinancials).map(Number).sort((a, b) => b - a);
+    for (const yr of years) {
+      const fin = prop.yearlyFinancials[yr];
+      if (isExplicitManualRecord(fin, yr) && fin.currentValue && !isAutoEstimatedVal(yr, fin.currentValue)) {
+        effectiveCurrentValue = fin.currentValue;
+        break;
+      }
+    }
+  }
+
+  // 2. Determinar hipoteca y estado de cálculo:
+  // A) ¿El targetYear tiene un registro de hipoteca introducido explícitamente por el usuario?
+  if (targetYearFin && isExplicitManualRecord(targetYearFin, targetYear) && (targetYearFin.mortgageDebt ?? 0) > 0) {
+    return {
+      currentValue: effectiveCurrentValue,
+      purchasePrice: targetYearFin.purchasePrice ?? purchasePrice,
+      purchaseExpenses: targetYearFin.purchaseExpenses ?? defaultPurchaseExpenses,
+      mortgageDebt: targetYearFin.mortgageDebt!,
+      monthlyMortgagePayment: targetYearFin.monthlyMortgagePayment ?? prop.monthlyMortgagePayment ?? 0,
+      isManual: true,
+      isMortgageCalculated: false,
+    };
+  }
+
+  // B) Buscar el año manual de referencia más reciente (<= targetYear) con deuda de hipoteca
+  let refYear = 2025;
+  let refDebt = prop.mortgageDebt ?? 0;
+  let refMonthlyPayment = prop.monthlyMortgagePayment ?? 0;
+  let foundManualRef = false;
+
+  if (prop.yearlyFinancials) {
+    const sortedYears = Object.keys(prop.yearlyFinancials)
+      .map(Number)
+      .filter(y => y <= targetYear)
+      .sort((a, b) => b - a);
+
+    for (const yr of sortedYears) {
+      const fin = prop.yearlyFinancials[yr];
+      if (isExplicitManualRecord(fin, yr) && (fin.mortgageDebt ?? 0) > 0) {
+        refYear = yr;
+        refDebt = fin.mortgageDebt!;
+        refMonthlyPayment = fin.monthlyMortgagePayment ?? prop.monthlyMortgagePayment ?? 0;
+        foundManualRef = true;
+        break;
+      }
+    }
+  }
+
+  if (!foundManualRef && (prop.mortgageDebt ?? 0) > 0) {
+    refYear = 2025;
+    refDebt = prop.mortgageDebt!;
+    refMonthlyPayment = prop.monthlyMortgagePayment ?? 0;
+  }
+
+  const interestRate = prop.mortgageInterestRate ?? 0;
+
+  // C) Si targetYear > refYear Y tenemos interés > 0 Y deuda de ref > 0 Y cuota > 0:
+  // Proyectar en memoria por amortización francesa
+  if (targetYear > refYear && interestRate > 0 && refDebt > 0 && refMonthlyPayment > 0) {
+    const yearsDiff = targetYear - refYear;
+    const monthsElapsed = yearsDiff * 12;
+    const calculatedDebt = calculateAmortizedMortgageDebt(refDebt, refMonthlyPayment, interestRate, monthsElapsed);
+
+    return {
+      currentValue: effectiveCurrentValue,
+      purchasePrice: targetYearFin?.purchasePrice ?? prop.purchasePrice ?? purchasePrice,
+      purchaseExpenses: targetYearFin?.purchaseExpenses ?? defaultPurchaseExpenses,
+      mortgageDebt: calculatedDebt,
+      monthlyMortgagePayment: refMonthlyPayment,
+      isManual: false,
+      isMortgageCalculated: true,
+    };
+  }
+
+  // D) Respaldo estático: devolver el valor de referencia sin proyectar
+  return {
+    currentValue: effectiveCurrentValue,
+    purchasePrice: targetYearFin?.purchasePrice ?? prop.purchasePrice ?? purchasePrice,
+    purchaseExpenses: targetYearFin?.purchaseExpenses ?? defaultPurchaseExpenses,
+    mortgageDebt: refDebt,
+    monthlyMortgagePayment: refMonthlyPayment,
+    isManual: foundManualRef,
+    isMortgageCalculated: false,
+  };
 }

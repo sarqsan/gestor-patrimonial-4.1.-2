@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AppState, Property, PropertyExpense, getThemeColors } from "../types";
+import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
 import { 
   Building, 
   Briefcase, 
@@ -420,18 +420,14 @@ export default function Dashboard({
   let portfolioMonthlyCashflow = 0; // Prorated monthly cashflow
 
   properties.forEach((prop) => {
-    // Get year-specific financials if available, otherwise fallback to defaults
-    const yearlyFin = prop.yearlyFinancials?.[activeYear];
+    // Obtener métricas financieras efectivas de forma segura y consistente entre ejercicios
+    const eff = getEffectivePropertyFinancials(prop, activeYear);
     
-    // Estimate 3.5% revaluation per year starting from 2025 if currentValue is not set
-    const yearsDiff = Math.max(0, activeYear - 2025);
-    const estimatedCurrentValue = Math.round(prop.purchasePrice * Math.pow(1.035, yearsDiff));
-    const currentValue = yearlyFin?.currentValue ?? estimatedCurrentValue;
-    
-    const purchasePriceVal = yearlyFin?.purchasePrice ?? prop.purchasePrice ?? 0;
-    const purchaseExpensesVal = yearlyFin?.purchaseExpenses ?? Math.round(purchasePriceVal * 0.10); // fallback to 10% standard expenses
-    const mortgageDebtVal = yearlyFin?.mortgageDebt ?? 0;
-    const monthlyMortgagePaymentVal = yearlyFin?.monthlyMortgagePayment ?? 0;
+    const currentValue = eff.currentValue;
+    const purchasePriceVal = eff.purchasePrice;
+    const purchaseExpensesVal = eff.purchaseExpenses;
+    const mortgageDebtVal = eff.mortgageDebt;
+    const monthlyMortgagePaymentVal = eff.monthlyMortgagePayment;
 
     totalMarketValue += currentValue;
     totalMortgageDebt += mortgageDebtVal;
@@ -1063,17 +1059,12 @@ Rendimientos neto trabajo: ${Math.round(user1.netoTrabajo * 1.05)}`;
               </thead>
               <tbody className="divide-y divide-slate-800/40 font-sans">
                 {properties.map((prop) => {
-                  const yearlyFin = prop.yearlyFinancials?.[activeYear];
-                  
-                  // Estimate 3.5% revaluation per year starting from 2025 if currentValue is not set
-                  const yearsDiff = Math.max(0, activeYear - 2025);
-                  const estimatedCurrentValue = Math.round(prop.purchasePrice * Math.pow(1.035, yearsDiff));
-                  const curVal = yearlyFin?.currentValue ?? estimatedCurrentValue;
-                  
-                  const purPrice = yearlyFin?.purchasePrice ?? prop.purchasePrice ?? 0;
-                  const purExp = yearlyFin?.purchaseExpenses ?? Math.round(purPrice * 0.10); // fallback to 10% standard expenses
-                  const mortDebt = yearlyFin?.mortgageDebt ?? 0;
-                  const mortPay = yearlyFin?.monthlyMortgagePayment ?? 0;
+                  const eff = getEffectivePropertyFinancials(prop, activeYear);
+                  const curVal = eff.currentValue;
+                  const purPrice = eff.purchasePrice;
+                  const purExp = eff.purchaseExpenses;
+                  const mortDebt = eff.mortgageDebt;
+                  const mortPay = eff.monthlyMortgagePayment;
 
                   const totalInvestment = purPrice + purExp;
                   const equity = curVal - mortDebt;

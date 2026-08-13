@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Property, PropertyExpense, TenantContractRecord } from "../types";
+import { Property, PropertyExpense, TenantContractRecord, getEffectivePropertyFinancials } from "../types";
 import * as XLSX from "xlsx";
 import { 
   Building, 
@@ -85,6 +85,10 @@ export default function Properties({
   const [finPurchaseExpenses, setFinPurchaseExpenses] = useState("");
   const [finMortgageDebt, setFinMortgageDebt] = useState("");
   const [finMonthlyMortgagePayment, setFinMonthlyMortgagePayment] = useState("");
+  const [finInterestRate, setFinInterestRate] = useState("");
+  const [finStartDate, setFinStartDate] = useState("");
+  const [finTermYears, setFinTermYears] = useState("");
+  const [isMortgageCalculatedState, setIsMortgageCalculatedState] = useState(false);
 
   const [docCategory, setDocCategory] = useState<'ibi' | 'seguros' | 'comunidad' | 'reparaciones' | 'muebles_electrodomesticos' | 'otros'>('ibi');
   const [uploadedFileBase64, setUploadedFileBase64] = useState<string | null>(null);
@@ -105,12 +109,16 @@ export default function Properties({
     if (openFinancialsPropertyId) {
       const prop = properties.find(p => p.id === openFinancialsPropertyId);
       if (prop) {
-        const yearly = prop.yearlyFinancials?.[financialYear];
-        setFinCurrentValue(yearly?.currentValue?.toString() ?? prop.purchasePrice?.toString() ?? "0");
-        setFinPurchasePrice(yearly?.purchasePrice?.toString() ?? prop.purchasePrice?.toString() ?? "0");
-        setFinPurchaseExpenses(yearly?.purchaseExpenses?.toString() ?? "0");
-        setFinMortgageDebt(yearly?.mortgageDebt?.toString() ?? "0");
-        setFinMonthlyMortgagePayment(yearly?.monthlyMortgagePayment?.toString() ?? "0");
+        const eff = getEffectivePropertyFinancials(prop, financialYear);
+        setFinCurrentValue(eff.currentValue.toString());
+        setFinPurchasePrice(eff.purchasePrice.toString());
+        setFinPurchaseExpenses(eff.purchaseExpenses.toString());
+        setFinMortgageDebt(eff.mortgageDebt.toString());
+        setFinMonthlyMortgagePayment(eff.monthlyMortgagePayment.toString());
+        setFinInterestRate(prop.mortgageInterestRate?.toString() ?? "");
+        setFinStartDate(prop.mortgageStartDate ?? "");
+        setFinTermYears(prop.mortgageTermYears?.toString() ?? "");
+        setIsMortgageCalculatedState(eff.isMortgageCalculated ?? false);
       }
     }
   }, [openFinancialsPropertyId, financialYear, properties]);
@@ -119,17 +127,33 @@ export default function Properties({
     const updatedYearly = {
       ...(prop.yearlyFinancials || {})
     };
+
+    const numCurrentValue = Number(finCurrentValue.toString().replace(",", ".") || 0);
+    const numPurchasePrice = Number(finPurchasePrice.toString().replace(",", ".") || 0);
+    const numPurchaseExpenses = Number(finPurchaseExpenses.toString().replace(",", ".") || 0);
+    const numMortgageDebt = Number(finMortgageDebt.toString().replace(",", ".") || 0);
+    const numMonthlyMortgagePayment = Number(finMonthlyMortgagePayment.toString().replace(",", ".") || 0);
+    const numInterestRate = Number(finInterestRate.toString().replace(",", ".") || 0);
+    const numTermYears = Number(finTermYears.toString().replace(",", ".") || 0);
+
     updatedYearly[financialYear] = {
-      currentValue: Number(finCurrentValue.toString().replace(",", ".") || 0),
-      purchasePrice: Number(finPurchasePrice.toString().replace(",", ".") || 0),
-      purchaseExpenses: Number(finPurchaseExpenses.toString().replace(",", ".") || 0),
-      mortgageDebt: Number(finMortgageDebt.toString().replace(",", ".") || 0),
-      monthlyMortgagePayment: Number(finMonthlyMortgagePayment.toString().replace(",", ".") || 0),
+      currentValue: numCurrentValue,
+      purchasePrice: numPurchasePrice,
+      purchaseExpenses: numPurchaseExpenses,
+      mortgageDebt: numMortgageDebt,
+      monthlyMortgagePayment: numMonthlyMortgagePayment,
+      isManual: true,
     };
 
     const updatedProp: Property = {
       ...prop,
-      purchasePrice: Number(finPurchasePrice.toString().replace(",", ".") || prop.purchasePrice || 0),
+      purchasePrice: numPurchasePrice || prop.purchasePrice || 0,
+      currentValue: numCurrentValue,
+      mortgageDebt: numMortgageDebt,
+      monthlyMortgagePayment: numMonthlyMortgagePayment,
+      mortgageInterestRate: numInterestRate,
+      mortgageStartDate: finStartDate || undefined,
+      mortgageTermYears: numTermYears,
       yearlyFinancials: updatedYearly
     };
     
@@ -1610,12 +1634,26 @@ export default function Properties({
 
                           <div className="grid grid-cols-2 gap-3">
                             <div>
-                              <label className="block text-[10px] text-slate-400 uppercase font-mono mb-1">Capital Hipoteca Pendiente (€)</label>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="block text-[10px] text-slate-400 uppercase font-mono">Capital Hipoteca Pendiente (€)</label>
+                                {isMortgageCalculatedState ? (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium">
+                                    🔵 Proyección
+                                  </span>
+                                ) : (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                                    🟢 Dato Real / Manual
+                                  </span>
+                                )}
+                              </div>
                               <input
                                 type="text"
                                 inputMode="decimal"
                                 value={finMortgageDebt}
-                                onChange={(e) => setFinMortgageDebt(e.target.value)}
+                                onChange={(e) => {
+                                  setFinMortgageDebt(e.target.value);
+                                  setIsMortgageCalculatedState(false);
+                                }}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:ring-1 focus:ring-amber-500 font-semibold"
                               />
                             </div>
@@ -1628,6 +1666,45 @@ export default function Properties({
                                 onChange={(e) => setFinMonthlyMortgagePayment(e.target.value)}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:ring-1 focus:ring-amber-500 font-semibold"
                               />
+                            </div>
+                          </div>
+
+                          <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 space-y-2">
+                            <div className="text-[10px] font-bold text-amber-400 font-mono uppercase tracking-wider">
+                              ⚙️ Amortización Hipotecaria (Calculadora Sistema Francés)
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[9px] text-slate-400 font-mono mb-0.5">Tipo Interés Anual (%)</label>
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  placeholder="Ej: 3.25"
+                                  value={finInterestRate}
+                                  onChange={(e) => setFinInterestRate(e.target.value)}
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-amber-300 font-semibold"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] text-slate-400 font-mono mb-0.5">Fecha Referencia</label>
+                                <input
+                                  type="date"
+                                  value={finStartDate}
+                                  onChange={(e) => setFinStartDate(e.target.value)}
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-300"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] text-slate-400 font-mono mb-0.5">Plazo Total (Años)</label>
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  placeholder="Ej: 25"
+                                  value={finTermYears}
+                                  onChange={(e) => setFinTermYears(e.target.value)}
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-300"
+                                />
+                              </div>
                             </div>
                           </div>
 
