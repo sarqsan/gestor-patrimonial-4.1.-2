@@ -143,7 +143,14 @@ export default function Expenses({
     setViewerError(null);
     const exp = selectedReceiptExpense;
     if (!exp) return;
-    if (exp.receiptPath) {
+    if (exp.receiptVaultId) {
+      // Almacenamiento remoto propio: descarga autorizada y URL local para el visor.
+      setViewerLoading(true);
+      getAttachmentBlob({ vaultId: exp.receiptVaultId })
+        .then((blob) => { if (!cancelled) setViewerSrc(URL.createObjectURL(blob)); })
+        .catch((err) => { if (!cancelled) setViewerError(err instanceof Error ? err.message : "No se pudo cargar el comprobante."); })
+        .finally(() => { if (!cancelled) setViewerLoading(false); });
+    } else if (exp.receiptPath) {
       setViewerLoading(true);
       getAttachmentPreviewUrl(exp.receiptPath)
         .then((url) => { if (!cancelled) setViewerSrc(url); })
@@ -206,12 +213,13 @@ export default function Expenses({
         folder: "expenses",
         file,
         attachmentId: newAttachmentId("rcpt"),
+        movementId: expenseId,
       });
       onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
       if (stored.mode === "local-inline") {
         alert(
-          "Comprobante guardado en la copia local de este navegador (Firebase está bloqueado por administración). " +
-          "Se enviará a la nube cuando se restablezca el acceso."
+          "El almacenamiento remoto no está disponible ahora mismo: el comprobante queda en la COLA LOCAL de este " +
+          "navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
         );
       }
     } catch (err) {
@@ -222,6 +230,7 @@ export default function Expenses({
   const handleDownloadReceipt = async (exp: PropertyExpense) => {
     try {
       await downloadAttachment({
+        vaultId: exp.receiptVaultId,
         storagePath: exp.receiptPath,
         inlineData: exp.receiptUrl,
         fileName: exp.receiptName || `comprobante_${exp.id}`,
@@ -348,7 +357,7 @@ export default function Expenses({
         }
 
         try {
-          const blob = await getAttachmentBlob({ storagePath: exp.receiptPath, inlineData: exp.receiptUrl });
+          const blob = await getAttachmentBlob({ vaultId: exp.receiptVaultId, storagePath: exp.receiptPath, inlineData: exp.receiptUrl });
           receiptsFolder?.file(fileName, await blob.arrayBuffer());
         } catch (err) {
           console.error("No se pudo añadir el comprobante al ZIP:", exp.id, err);
@@ -571,6 +580,7 @@ export default function Expenses({
           folder: "expenses",
           file: pendingReceiptFile,
           attachmentId: newAttachmentId("rcpt"),
+          movementId: editingExpense?.id ?? expenseId,
         });
         receiptFields = expenseReceiptFieldsFromStored(stored);
       } catch (err) {

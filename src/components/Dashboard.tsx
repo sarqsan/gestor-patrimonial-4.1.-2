@@ -266,11 +266,13 @@ export default function Dashboard({
           folder: "expenses",
           file: scannedFile,
           attachmentId: newAttachmentId("rcpt"),
+          propertyId: propId,
         });
         receiptFields = expenseReceiptFieldsFromStored(stored);
         if (stored.mode === "local-inline") {
           alert(
-            "Factura guardada en la copia local de este navegador (Firebase está bloqueado por administración). Se enviará a la nube cuando se restablezca el acceso."
+            "El almacenamiento remoto no está disponible ahora mismo: la factura queda en la COLA LOCAL de este " +
+            "navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
           );
         }
       } catch (err) {

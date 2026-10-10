@@ -22,6 +22,14 @@ import {
   localInlineCapacityProblem,
   maybeDownscaleImage,
 } from "./localVault";
+import {
+  VaultAuthError,
+  VaultError,
+  getActiveVaultUser,
+  getVaultToken,
+  vaultDownloadFile,
+  vaultUploadFile,
+} from "./vaultClient";
 import type { PropertyExpense } from "../types";
 
 export class AttachmentError extends Error {}
@@ -85,15 +93,17 @@ async function ensureSignedIn(): Promise<void> {
 export interface StoredAttachment {
   /** Ruta en Firebase Storage (solo en modo "storage"). */
   storagePath?: string;
-  /** Data URL en la copia local del usuario (solo en modo "local-inline"). */
+  /** Referencia al vault, el almacenamiento remoto propio (solo en modo "vault"). */
+  vaultId?: string;
+  /** Data URL en la copia local del usuario (solo en modo "local-inline": cola temporal). */
   inlineData?: string;
   /**
-   * "storage": guardado en Firebase Storage (vía normal).
-   * "local-inline": contingencia local por bloqueo administrativo de Firebase; formato
-   * legado (data URL) que todas las pantallas leen y descargan, con vía de salida hacia
-   * Storage cuando se restablezca el acceso (externalizeImportedExpenses).
+   * "vault": almacenamiento remoto persistente propio (destino definitivo actual).
+   * "storage": Firebase Storage (si el proyecto Firebase vuelve a dar sesión).
+   * "local-inline": cola local temporal por indisponibilidad del almacenamiento remoto;
+   *   se sincronizará con el destino remoto en cuanto esté disponible.
    */
-  mode: "storage" | "local-inline";
+  mode: "vault" | "storage" | "local-inline";
   name: string;
   contentType: string;
   size: number;
@@ -101,16 +111,26 @@ export interface StoredAttachment {
 
 /**
  * Campos de comprobante de operación a partir del resultado de una subida.
- * En modo local escribe el campo legado receiptUrl (soportado por visor, descarga,
- * exportación ZIP/AEAT y reconciliación); en modo Storage escribe receiptPath.
+ * Cada modo escribe SU referencia y limpia las demás para no mezclar orígenes:
+ * vault → receiptVaultId; Storage → receiptPath; cola local → receiptUrl (legado).
  */
 export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partial<PropertyExpense> {
+  if (stored.mode === "vault") {
+    return {
+      receiptVaultId: stored.vaultId,
+      receiptName: stored.name,
+      receiptType: stored.contentType,
+      receiptPath: undefined,
+      receiptUrl: undefined,
+    };
+  }
   if (stored.mode === "local-inline") {
     return {
       receiptUrl: stored.inlineData,
       receiptName: stored.name,
       receiptType: stored.contentType,
       receiptPath: undefined,
+      receiptVaultId: undefined,
     };
   }
   return {
@@ -118,6 +138,7 @@ export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partia
     receiptName: stored.name,
     receiptType: stored.contentType,
     receiptUrl: undefined,
+    receiptVaultId: undefined,
   };
 }
 
@@ -200,26 +221,62 @@ export async function uploadAttachment(opts: {
   folder: AttachmentFolder;
   file: File;
   attachmentId?: string;
+  /** Vincula el archivo a su movimiento en el índice del vault (trazabilidad). */
+  movementId?: string;
+  /** Vincula el archivo a su inmueble en el índice del vault (trazabilidad). */
+  propertyId?: string;
   /** Solo para contratos generados (.doc). */
   allowWordDocument?: boolean;
 }): Promise<StoredAttachment> {
   const invalid = validateAttachment(opts.file, { allowWordDocument: opts.allowWordDocument });
   if (invalid) throw new AttachmentError(invalid);
 
+  const contentType = resolveContentType(opts.file.name, opts.file.type);
+
+  // ---- 1) VAULT: almacenamiento remoto persistente propio (destino definitivo). ----
+  // No depende de la sesión anónima de Firebase. Si hay sesión del vault para este
+  // usuario, el archivo viaja al backend de la aplicación y queda disponible entre
+  // sesiones y dispositivos.
+  if (getVaultToken(opts.userId)) {
+    try {
+      const bytes = new Uint8Array(await opts.file.arrayBuffer());
+      const meta = await withTimeout(
+        vaultUploadFile({
+          username: opts.userId,
+          bytes,
+          name: opts.file.name,
+          contentType,
+          movementId: opts.movementId,
+          propertyId: opts.propertyId,
+        }),
+        UPLOAD_TIMEOUT_MS,
+        "La subida al almacenamiento remoto ha superado el tiempo de espera. El archivo no se ha guardado; inténtalo de nuevo."
+      );
+      return { mode: "vault", vaultId: meta.id, name: opts.file.name, contentType, size: meta.size };
+    } catch (err) {
+      // Sesión inválida o rechazo del vault: degradar a Firebase y, en último término,
+      // a la cola local. Nunca se declara éxito sin confirmación del destino remoto.
+      if (!(err instanceof VaultAuthError || err instanceof VaultError || err instanceof AttachmentError)) {
+        throw err instanceof Error ? err : new AttachmentError(String(err));
+      }
+      console.warn("[attachments] Vault no disponible para la subida; se intenta Firebase:", err);
+    }
+  }
+
+  // ---- 2) FIREBASE STORAGE: si el proyecto Firebase vuelve a autorizar la sesión. ----
   try {
     await ensureSignedIn();
   } catch (err) {
     // Contingencia SOLO ante rechazo administrativo del proyecto Firebase: comprobantes
-    // de gastos y documentos de inmueble se guardan en formato legado (data URL) en la
-    // copia local del usuario. Los contratos no tienen campo legado equivalente y las
-    // subidas verificadas (importaciones/migración) mantienen su comportamiento estricto.
+    // de gastos y documentos de inmueble quedan en la COLA LOCAL (data URL) a la espera de
+    // sincronizarse con el destino remoto. Los contratos no tienen campo legado equivalente
+    // y las subidas verificadas (importaciones/migración) mantienen su comportamiento estricto.
     if (err instanceof AdminRestrictedAttachmentError && opts.folder !== "contracts") {
       return storeLocalInlineFallback(opts.file);
     }
     throw err;
   }
 
-  const contentType = resolveContentType(opts.file.name, opts.file.type);
   const attachmentId = opts.attachmentId ?? newAttachmentId("att");
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, attachmentId, opts.file.name);
 
@@ -324,8 +381,32 @@ export async function getAttachmentBytes(storagePath: string): Promise<Blob> {
   }
 }
 
-/** Devuelve el Blob de un adjunto nuevo (Storage) o histórico (data URL). */
-export async function getAttachmentBlob(source: { storagePath?: string; inlineData?: string }): Promise<Blob> {
+/**
+ * Devuelve el Blob de un adjunto. Prioridad de lectura (compatibilidad histórica):
+ *   1. vault (referencia vaultId del almacenamiento remoto propio)
+ *   2. Firebase Storage (storagePath)
+ *   3. legado incrustado (inlineData / receiptUrl / fileData, data URL)
+ */
+export async function getAttachmentBlob(source: {
+  vaultId?: string;
+  vaultUsername?: string;
+  storagePath?: string;
+  inlineData?: string;
+}): Promise<Blob> {
+  if (source.vaultId) {
+    const username = source.vaultUsername ?? getActiveVaultUser();
+    if (!username) throw new AttachmentError("No hay sesión del almacenamiento remoto para recuperar este archivo.");
+    try {
+      return await withTimeout(
+        vaultDownloadFile(username, source.vaultId),
+        UPLOAD_TIMEOUT_MS,
+        "La descarga del archivo ha superado el tiempo de espera."
+      );
+    } catch (err) {
+      if (err instanceof AttachmentError) throw err;
+      throw new AttachmentError(err instanceof Error ? err.message : String(err));
+    }
+  }
   if (source.storagePath) return getAttachmentBytes(source.storagePath);
   if (source.inlineData && isInlineDataUrl(source.inlineData)) {
     const res = await fetch(source.inlineData);
@@ -336,11 +417,18 @@ export async function getAttachmentBlob(source: { storagePath?: string; inlineDa
 
 /** Descarga un adjunto con el nombre original. */
 export async function downloadAttachment(opts: {
+  vaultId?: string;
+  vaultUsername?: string;
   storagePath?: string;
   inlineData?: string;
   fileName: string;
 }): Promise<void> {
-  const blob = await getAttachmentBlob({ storagePath: opts.storagePath, inlineData: opts.inlineData });
+  const blob = await getAttachmentBlob({
+    vaultId: opts.vaultId,
+    vaultUsername: opts.vaultUsername,
+    storagePath: opts.storagePath,
+    inlineData: opts.inlineData,
+  });
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = objectUrl;

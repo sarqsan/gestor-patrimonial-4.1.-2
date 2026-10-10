@@ -22,6 +22,7 @@ export interface PropertyContract {
   pdfName?: string;
   pdfSize?: string;
   pdfPath?: string; // Ruta en Firebase Storage del PDF real del contrato
+  pdfVaultId?: string; // Referencia al vault (almacenamiento remoto propio). Prioridad de lectura: vault > Storage > legado.
 }
 
 export interface TenantContractRecord {
@@ -34,6 +35,7 @@ export interface TenantContractRecord {
   pdfName?: string;
   pdfSize?: string;
   pdfPath?: string; // Ruta en Firebase Storage del PDF real
+  pdfVaultId?: string; // Referencia al vault (almacenamiento remoto propio)
   notes?: string;
 }
 
@@ -56,6 +58,7 @@ export interface PropertyDocument {
   uploadDate: string;
   fileData?: string; // LEGADO: data URL Base64 incrustada. Solo se escribe como contingencia local si Firebase está bloqueado por administración.
   storagePath?: string; // Ruta en Firebase Storage (nuevos adjuntos)
+  vaultId?: string; // Referencia al vault (almacenamiento remoto propio). Prioridad: vault > Storage > legado.
   contentType?: string;
 }
 
@@ -116,8 +119,9 @@ export interface PropertyExpense {
   amount: number;
   date: string; // YYYY-MM-DD
   description?: string;
-  receiptUrl?: string; // LEGADO: data URL Base64 incrustada (históricos). También contingencia local si Firebase está bloqueado por administración.
+  receiptUrl?: string; // LEGADO: data URL Base64 incrustada (históricos). También cola local temporal si el almacenamiento remoto no está disponible.
   receiptPath?: string; // Ruta en Firebase Storage (nuevos comprobantes)
+  receiptVaultId?: string; // Referencia al vault (almacenamiento remoto propio). Prioridad de lectura: vault > Storage > legado.
   receiptName?: string;
   receiptType?: string;
   status?: 'synced' | 'pending' | 'error';

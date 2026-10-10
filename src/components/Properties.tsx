@@ -228,16 +228,16 @@ export default function Properties({
       category: docCategory,
       year: docYear,
       uploadDate: new Date().toLocaleDateString('es-ES'),
-      // Modo Storage: referencia a Firebase Storage. Modo local-inline (bloqueo
-      // administrativo de Firebase): data URL en el campo legado fileData, que la
-      // descarga y el visor ya soportan. Nunca se escriben los dos a la vez.
+      // Cada modo escribe SU referencia y ninguna otra: vault (destino remoto propio),
+      // Storage (Firebase) o fileData legado (cola local cuando no hay destino remoto).
       storagePath: stored.mode === "storage" ? stored.storagePath : undefined,
+      vaultId: stored.mode === "vault" ? stored.vaultId : undefined,
       fileData: stored.mode === "local-inline" ? stored.inlineData : undefined,
       contentType: stored.contentType,
     };
     if (stored.mode === "local-inline") {
       alert(
-        "Documento guardado en la copia local de este navegador (Firebase está bloqueado por administración). Se enviará a la nube cuando se restablezca el acceso."
+        "El almacenamiento remoto no está disponible ahora mismo: el documento queda en la COLA LOCAL de este navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
       );
     }
 
@@ -320,6 +320,7 @@ export default function Properties({
 
   const handleSaveCardContract = async (prop: Property): Promise<boolean> => {
     let newPdfPath: string | undefined;
+    let newPdfVaultId: string | undefined;
     if (cardPdfFile) {
       if (!currentUser) {
         setCardError("No hay una sesión activa para subir el contrato.");
@@ -328,12 +329,15 @@ export default function Properties({
       setCardIsSaving(true);
       setCardError(null);
       try {
-        newPdfPath = (await uploadAttachment({
+        const storedContract = await uploadAttachment({
           userId: currentUser,
           folder: "contracts",
           file: cardPdfFile,
           attachmentId: newAttachmentId("ctr"),
-        })).storagePath;
+          propertyId: prop.id,
+        });
+        newPdfPath = storedContract.storagePath;
+        newPdfVaultId = storedContract.vaultId;
       } catch (err) {
         setCardIsSaving(false);
         setCardError(err instanceof Error ? err.message : "No se pudo subir el contrato.");
@@ -342,6 +346,7 @@ export default function Properties({
       setCardIsSaving(false);
     }
     const effectivePdfPath = newPdfPath || (cardPdfName ? cardPdfPath || undefined : undefined);
+    const effectivePdfVaultId = newPdfVaultId || (cardPdfName ? prop.contract?.pdfVaultId : undefined);
     let updatedHistory: TenantContractRecord[] = prop.tenantHistory && prop.tenantHistory.length > 0
       ? [...prop.tenantHistory]
       : [];
@@ -357,7 +362,8 @@ export default function Properties({
         monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || prop.monthlyRent || 0),
         pdfName: cardPdfName || prop.contract?.pdfName,
         pdfSize: cardPdfSize || prop.contract?.pdfSize,
-        pdfPath: effectivePdfPath || prop.contract?.pdfPath
+        pdfPath: effectivePdfPath || prop.contract?.pdfPath,
+        pdfVaultId: effectivePdfVaultId || prop.contract?.pdfVaultId
       });
     } else if (updatedHistory.length > 0) {
       // Update the latest existing record with the entered contract details
@@ -369,7 +375,8 @@ export default function Properties({
         monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || updatedHistory[lastIdx].monthlyRent || 0),
         pdfName: cardPdfName || updatedHistory[lastIdx].pdfName,
         pdfSize: cardPdfSize || updatedHistory[lastIdx].pdfSize,
-        pdfPath: effectivePdfPath || updatedHistory[lastIdx].pdfPath
+        pdfPath: effectivePdfPath || updatedHistory[lastIdx].pdfPath,
+        pdfVaultId: effectivePdfVaultId || updatedHistory[lastIdx].pdfVaultId
       };
     }
 
@@ -382,7 +389,8 @@ export default function Properties({
       monthlyRent: activeMonthlyRent,
       pdfName: cardPdfName || undefined,
       pdfSize: cardPdfSize || undefined,
-      pdfPath: effectivePdfPath
+      pdfPath: effectivePdfPath,
+      pdfVaultId: effectivePdfVaultId
     };
 
     // If tenant change is requested and a new tenant name is provided
@@ -424,7 +432,8 @@ export default function Properties({
         monthlyRent: newRentNum,
         pdfName: newTenantPdfName || undefined,
         pdfSize: newTenantPdfSize || undefined,
-        pdfPath: undefined
+        pdfPath: undefined,
+        pdfVaultId: undefined
       };
     }
 
@@ -665,6 +674,7 @@ export default function Properties({
 
     // Si se ha elegido un PDF nuevo, se sube antes de guardar el inmueble. Si falla, no se guarda nada.
     let newContractPdfPath: string | undefined;
+    let newContractPdfVaultId: string | undefined;
     if (contractPdfFile) {
       if (!currentUser) {
         setContractPdfError("No hay una sesión activa para subir el contrato.");
@@ -673,12 +683,15 @@ export default function Properties({
       setIsSavingProperty(true);
       setContractPdfError(null);
       try {
-        newContractPdfPath = (await uploadAttachment({
+        const storedPropContract = await uploadAttachment({
           userId: currentUser,
           folder: "contracts",
           file: contractPdfFile,
           attachmentId: newAttachmentId("ctr"),
-        })).storagePath;
+          propertyId: editingId || undefined,
+        });
+        newContractPdfPath = storedPropContract.storagePath;
+        newContractPdfVaultId = storedPropContract.vaultId;
       } catch (err) {
         setIsSavingProperty(false);
         setContractPdfError(err instanceof Error ? err.message : "No se pudo subir el contrato. El inmueble no se ha guardado.");
@@ -697,6 +710,7 @@ export default function Properties({
         pdfName: contractPdfName || undefined,
         pdfSize: contractPdfSize || undefined,
         pdfPath: newContractPdfPath || contractPdfPath || undefined,
+        pdfVaultId: newContractPdfVaultId || undefined,
       };
     }
     const existingProp = editingId ? properties.find(p => p.id === editingId) : undefined;
@@ -2037,7 +2051,7 @@ export default function Properties({
                                         <div className="flex items-center space-x-1.5 shrink-0">
                                           <button
                                             type="button"
-                                            onClick={() => downloadAttachment({ storagePath: doc.storagePath, inlineData: doc.fileData, fileName: doc.name }).catch((err) => alert(err instanceof Error ? err.message : "No se pudo descargar el documento."))}
+                                            onClick={() => downloadAttachment({ vaultId: doc.vaultId, storagePath: doc.storagePath, inlineData: doc.fileData, fileName: doc.name }).catch((err) => alert(err instanceof Error ? err.message : "No se pudo descargar el documento."))}
                                             className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[10px] text-blue-400 hover:text-blue-300 font-bold rounded-lg cursor-pointer"
                                           >
                                             Descargar / Imprimir
@@ -2354,7 +2368,7 @@ export default function Properties({
                                           alert("Este contrato no tiene archivo guardado en Storage (registro anterior o generado sin archivo). Vuelve a adjuntar el PDF.");
                                           return;
                                         }
-                                        downloadAttachment({ storagePath: prop.contract.pdfPath, fileName: prop.contract.pdfName || "contrato.pdf" })
+                                        downloadAttachment({ vaultId: prop.contract.pdfVaultId, storagePath: prop.contract.pdfPath, fileName: prop.contract.pdfName || "contrato.pdf" })
                                           .catch((err) => alert(err instanceof Error ? err.message : "No se pudo descargar el contrato."));
                                       }}
                                       className="text-[10px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded font-bold transition-all cursor-pointer"
