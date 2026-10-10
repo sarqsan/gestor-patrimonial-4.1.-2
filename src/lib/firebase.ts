@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot, getDocFromServer } from "firebase/firestore";
 import { getAuth, signInAnonymously } from "firebase/auth";
+import { getStorage } from "firebase/storage";
 import firebaseConfig from "../../firebase-applet-config.json" with { type: "json" };
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -11,10 +12,17 @@ export const db = firebaseConfig.firestoreDatabaseId && firebaseConfig.firestore
 
 export const auth = getAuth(app);
 
-// Authenticate anonymously so Firebase operations are always authorized
-signInAnonymously(auth).catch((err) => {
-  console.warn("Firebase anonymous auth fallback warning:", err);
-});
+// Firebase Storage usa el storageBucket de firebase-applet-config.json (no se inventa ningún bucket).
+export const storage = getStorage(app);
+
+// Authenticate anonymously so Firebase operations are always authorized.
+// authReady permite esperar a la sesión antes de subir o descargar adjuntos.
+export const authReady: Promise<boolean> = signInAnonymously(auth)
+  .then(() => true)
+  .catch((err) => {
+    console.warn("Firebase anonymous auth fallback warning:", err);
+    return false;
+  });
 
 export enum OperationType {
   CREATE = 'create',

@@ -1,3 +1,4 @@
+import { readApiJson } from "../lib/apiResponse";
 import React, { useState, useEffect } from "react";
 import { AppState, Property } from "../types";
 import { 
@@ -329,11 +330,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
         })
       });
 
-      if (!response.ok) {
-        throw new Error("La llamada al servidor de optimización de contratos de IA falló.");
-      }
-
-      const data = await response.json();
+      const data = await readApiJson(response, "La llamada al servidor de optimización de contratos de IA falló.");
       if (data && data.text) {
         setGeneratedContractText(data.text);
         setIsCustomText(true);
