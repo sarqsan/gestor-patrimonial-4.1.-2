@@ -60,7 +60,7 @@ interface ExpensesProps {
   onAddExpense: (newExpense: PropertyExpense) => void;
   onEditExpense?: (updatedExpense: PropertyExpense) => void;
   onDeleteExpense: (id: string) => void;
-  onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
+  onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => Promise<{ ok: boolean; savedCount?: number; errors?: string[] } | void> | void;
   onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void;
   currentUser?: string;
   user1Name: string;
@@ -463,16 +463,27 @@ export default function Expenses({
     }
     setIsImporting(false);
     if (onImportExpenses) {
-      onImportExpenses(prepared, importMode);
-      setImportSuccessMsg(`Se han importado con éxito ${prepared.length} registros contables.`);
-      setTimeout(() => {
-        setIsImportOpen(false);
-        setImportPreviewData(null);
-        setImportSuccessMsg(null);
-        setImportRejected([]);
-        setImportWarnings([]);
-        setImportStructureNote(null);
-      }, 1200);
+      try {
+        const res = await onImportExpenses(prepared, importMode);
+        if (res && res.ok === false) {
+          setIsImporting(false);
+          setImportError(`No se pudieron persistir los movimientos en la base de datos: ${res.errors?.join(", ") || "Error de escritura"}`);
+          return;
+        }
+        setImportSuccessMsg(`Se han importado con éxito ${prepared.length} registros contables.`);
+        setTimeout(() => {
+          setIsImportOpen(false);
+          setImportPreviewData(null);
+          setImportSuccessMsg(null);
+          setImportRejected([]);
+          setImportWarnings([]);
+          setImportStructureNote(null);
+        }, 1200);
+      } catch (err: any) {
+        setIsImporting(false);
+        setImportError(err instanceof Error ? err.message : "Error al guardar los registros contables.");
+        return;
+      }
     } else {
       // Fallback: add items one by one
       prepared.forEach(exp => onAddExpense(exp));
@@ -482,6 +493,7 @@ export default function Expenses({
       setImportWarnings([]);
       setImportStructureNote(null);
     }
+    setIsImporting(false);
   };
 
   const resetForm = () => {
