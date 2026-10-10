@@ -1,5 +1,6 @@
 import React from "react";
 import { AppState, SaveStatus, SyncEvent } from "../types";
+import MigrationPanel from "./MigrationPanel";
 import { 
   RefreshCw, 
   Activity, 
@@ -116,6 +117,11 @@ export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSyn
           <div className="text-xs font-bold text-amber-300 font-mono mt-0.5">{state.currentUser || "rentasync"}</div>
         </div>
       </div>
+
+      {/* MIGRATION PANEL - ADMIN */}
+      {state.currentUser && (
+        <MigrationPanel state={state} currentUser={state.currentUser} />
+      )}
 
       {/* SYNC EVENTS AUDIT LOG */}
       <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 shadow-lg space-y-6">
