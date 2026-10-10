@@ -2,6 +2,13 @@ import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
 import { uploadAttachment, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
+import {
+  IMPORT_ACCEPT,
+  validateImportFileName,
+  parseExpensesFromText,
+  parseExpensesFromRows,
+  ImportIssue,
+} from "../lib/importParsers";
 import * as XLSX from "xlsx";
 import JSZip from "jszip";
 import { 
@@ -93,6 +100,9 @@ export default function Expenses({
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
+  const [importRejected, setImportRejected] = useState<ImportIssue[]>([]);
+  const [importWarnings, setImportWarnings] = useState<ImportIssue[]>([]);
+  const [importStructureNote, setImportStructureNote] = useState<string | null>(null);
 
   // Form states
   const [propertyId, setPropertyId] = useState("");
@@ -362,81 +372,51 @@ export default function Expenses({
   const handleProcessImportFile = (file: File) => {
     setImportError(null);
     setImportSuccessMsg(null);
+    setImportPreviewData(null);
+    setImportRejected([]);
+    setImportWarnings([]);
+    setImportStructureNote(null);
+
+    // La validación del formato se hace SIEMPRE tras la selección del archivo
+    // (el filtro del selector del sistema no es fiable en Android), con un
+    // mensaje claro si el formato no está admitido.
+    const formatError = validateImportFileName(file.name);
+    if (formatError) {
+      setImportError(formatError);
+      return;
+    }
+
     const isJson = file.name.toLowerCase().endsWith(".json");
     const reader = new FileReader();
 
+    const applyResult = (result: ReturnType<typeof parseExpensesFromText>) => {
+      setImportRejected(result.rejected);
+      setImportWarnings(result.warnings);
+      setImportStructureNote(
+        result.structure.kind === "portfolio-backup"
+          ? "Copia de seguridad integral de la cartera detectada: se importarán solo los gastos/ingresos del respaldo. El archivo original no se modifica."
+          : null
+      );
+      if (result.error) {
+        setImportError(result.error);
+        setImportPreviewData(null);
+        return;
+      }
+      if (result.expenses.length === 0) {
+        setImportError(
+          result.rejected.length > 0
+            ? `Ninguna operación se puede importar con seguridad: ${result.rejected.length} registro(s) con datos insuficientes (ver detalle). El archivo original no se modifica.`
+            : "No se han encontrado registros válidos de gastos o ingresos en el archivo."
+        );
+        setImportPreviewData(null);
+        return;
+      }
+      setImportPreviewData(result.expenses);
+    };
+
     if (isJson) {
-      reader.onload = (e) => {
-        try {
-          const parsed = JSON.parse(e.target?.result as string);
-          
-          let rawArray: any[] | null = null;
-          if (Array.isArray(parsed)) {
-            rawArray = parsed;
-          } else if (parsed && typeof parsed === "object") {
-            if (Array.isArray(parsed.expenses)) {
-              rawArray = parsed.expenses;
-            } else if (Array.isArray(parsed.gastos)) {
-              rawArray = parsed.gastos;
-            } else if (Array.isArray(parsed.ingresos)) {
-              rawArray = parsed.ingresos;
-            } else if (Array.isArray(parsed.transacciones)) {
-              rawArray = parsed.transacciones;
-            } else if (Array.isArray(parsed.data?.expenses)) {
-              rawArray = parsed.data.expenses;
-            } else if (Array.isArray(parsed.portfolio?.expenses)) {
-              rawArray = parsed.portfolio.expenses;
-            } else if (Array.isArray(parsed.state?.expenses)) {
-              rawArray = parsed.state.expenses;
-            } else if (Array.isArray(parsed.data)) {
-              rawArray = parsed.data;
-            } else if (Array.isArray(parsed.items)) {
-              rawArray = parsed.items;
-            } else if (parsed.amount || parsed.Importe || parsed.category) {
-              rawArray = [parsed];
-            } else {
-              const candidateKey = Object.keys(parsed).find(k => 
-                Array.isArray(parsed[k]) && parsed[k].length > 0 && 
-                (parsed[k][0]?.amount !== undefined || parsed[k][0]?.Importe !== undefined || parsed[k][0]?.category)
-              );
-              if (candidateKey) {
-                rawArray = parsed[candidateKey];
-              }
-            }
-          }
-
-          if (rawArray && Array.isArray(rawArray)) {
-            const validExpenses: PropertyExpense[] = rawArray.map((item: any, idx: number) => {
-              const rawCat = item.category || (item.type === "ingreso" || item.Tipo === "ingreso" ? "rent" : "other");
-              const rawTypeStr = String(item.type || item.type_op || item.Tipo || (rawCat === "rent" ? "ingreso" : "gasto")).toLowerCase();
-              const finalType: "gasto" | "ingreso" = (rawTypeStr === "ingreso" || rawCat === "rent") ? "ingreso" : "gasto";
-
-              return {
-                id: String(item.id || `exp_imp_${Date.now()}_${idx}`),
-                propertyId: String(item.propertyId || item.property_id || properties[0]?.id || "prop_1"),
-                category: rawCat as any,
-                type: finalType,
-                amount: Number(item.amount || item.Importe || 0),
-                date: String(item.date || item.Fecha || new Date().toISOString().split("T")[0]),
-                description: item.description || item.descripcion || item.Descripcion || undefined
-              };
-            }).filter(item => item.amount > 0);
-
-            if (validExpenses.length === 0) {
-              setImportError("No se han encontrado registros válidos de gastos o ingresos en el archivo.");
-              setImportPreviewData(null);
-            } else {
-              setImportPreviewData(validExpenses);
-            }
-          } else {
-            setImportError("No se ha encontrado un listado de gastos/ingresos en el archivo JSON. Asegúrate de que el archivo exportado contenga operaciones contables.");
-            setImportPreviewData(null);
-          }
-        } catch (err) {
-          setImportError("Error al leer el archivo JSON. Asegúrate de que tenga un formato correcto.");
-          setImportPreviewData(null);
-        }
-      };
+      reader.onload = (e) => applyResult(parseExpensesFromText(String(e.target?.result ?? "")));
+      reader.onerror = () => setImportError("No se ha podido leer el archivo seleccionado.");
       reader.readAsText(file);
     } else {
       reader.onload = (e) => {
@@ -445,37 +425,13 @@ export default function Expenses({
           const workbook = XLSX.read(data, { type: "array" });
           const sheetName = workbook.SheetNames[0];
           const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-          const validExpenses: PropertyExpense[] = rows.map((item: any, idx: number) => {
-            const rawAmount = item["Importe (€)"] || item["Importe"] || item["amount"] || item["Importe_EUR"] || 0;
-            const rawDate = item["Fecha"] || item["date"] || new Date().toISOString().split("T")[0];
-            const rawCat = item["Categoría Fiscal"] || item["category"] || item["Categoría"] || "other";
-            const rawTypeStr = String(item["Tipo Registro"] || item["type"] || item["Tipo"] || (rawCat === "rent" ? "ingreso" : "gasto")).toLowerCase();
-            const finalType: "gasto" | "ingreso" = (rawTypeStr === "ingreso" || rawCat === "rent") ? "ingreso" : "gasto";
-            const rawPropId = item["ID Inmueble"] || item["propertyId"] || properties[0]?.id || "prop_1";
-
-            return {
-              id: String(item["ID Transacción"] || item["id"] || `exp_imp_${Date.now()}_${idx}`),
-              propertyId: String(rawPropId),
-              category: rawCat as any,
-              type: finalType,
-              amount: Number(rawAmount) || 0,
-              date: String(rawDate),
-              description: item["Descripción / Concepto"] || item["description"] || item["Descripción"] || undefined
-            };
-          }).filter(item => item.amount > 0);
-
-          if (validExpenses.length === 0) {
-            setImportError("No se han encontrado filas con importes válidos en la hoja de cálculo.");
-            setImportPreviewData(null);
-          } else {
-            setImportPreviewData(validExpenses);
-          }
+          applyResult(parseExpensesFromRows(rows));
         } catch (err) {
           setImportError("Error al procesar la hoja de cálculo. Comprueba que sea un archivo Excel (.xlsx, .xls) o CSV válido.");
           setImportPreviewData(null);
         }
       };
+      reader.onerror = () => setImportError("No se ha podido leer el archivo seleccionado.");
       reader.readAsArrayBuffer(file);
     }
   };
@@ -489,12 +445,18 @@ export default function Expenses({
         setIsImportOpen(false);
         setImportPreviewData(null);
         setImportSuccessMsg(null);
+        setImportRejected([]);
+        setImportWarnings([]);
+        setImportStructureNote(null);
       }, 1200);
     } else {
       // Fallback: add items one by one
       importPreviewData.forEach(exp => onAddExpense(exp));
       setIsImportOpen(false);
       setImportPreviewData(null);
+      setImportRejected([]);
+      setImportWarnings([]);
+      setImportStructureNote(null);
     }
   };
 
@@ -723,6 +685,9 @@ export default function Expenses({
                 setImportPreviewData(null);
                 setImportError(null);
                 setImportSuccessMsg(null);
+                setImportRejected([]);
+                setImportWarnings([]);
+                setImportStructureNote(null);
               }}
               className="inline-flex items-center px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
               title="Importar gastos e ingresos"
@@ -1635,7 +1600,7 @@ export default function Expenses({
                 </div>
                 <div>
                   <h3 className="font-bold text-white text-base">Importar Gastos e Ingresos</h3>
-                  <p className="text-xs text-slate-400">Sube un archivo JSON o Excel (.xlsx) exportado de otro perfil</p>
+                  <p className="text-xs text-slate-400">Sube un archivo JSON o hoja de cálculo (.xlsx, .xls, .csv) exportado de otro perfil</p>
                 </div>
               </div>
               <button
@@ -1649,19 +1614,9 @@ export default function Expenses({
             <div className="p-6 space-y-5">
               {/* FILE UPLOADER */}
               <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/50 rounded-2xl p-6 text-center transition-colors bg-slate-950/40">
-                <input
-                  type="file"
-                  id="expenses-import-file"
-                  accept=".json,.xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleProcessImportFile(file);
-                  }}
-                />
                 <label
                   htmlFor="expenses-import-file"
-                  className="cursor-pointer flex flex-col items-center gap-2"
+                  className="relative cursor-pointer flex flex-col items-center gap-2"
                 >
                   <div className="p-3 bg-slate-800 rounded-xl text-amber-400">
                     <FileSpreadsheet className="w-8 h-8" />
@@ -1669,7 +1624,25 @@ export default function Expenses({
                   <div>
                     <span className="font-semibold text-white text-sm hover:underline">Haz clic para seleccionar archivo</span>
                     <p className="text-xs text-slate-400 mt-1">Soporta archivos JSON, Excel (.xlsx, .xls) y CSV</p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      El formato se valida después de elegir el archivo. En Android, si tu JSON aparece
+                      como «archivo», selecciónalo igualmente: no debe quedar en gris.
+                    </p>
                   </div>
+                  {/* Input cubriendo la zona (sin display:none): con `hidden` y solo
+                      extensiones en `accept`, el selector de Android deja los .json en
+                      gris o no abre el picker. La validación final es posterior. */}
+                  <input
+                    type="file"
+                    id="expenses-import-file"
+                    accept={IMPORT_ACCEPT}
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                    onClick={(e) => { e.currentTarget.value = ""; }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleProcessImportFile(file);
+                    }}
+                  />
                 </label>
               </div>
 
@@ -1686,6 +1659,46 @@ export default function Expenses({
                 <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center gap-2">
                   <Check className="w-4 h-4 shrink-0 text-emerald-400" />
                   <span>{importSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* STRUCTURE NOTE (copia integral vs. lista aislada) */}
+              {importStructureNote && (
+                <div className="p-3 bg-slate-800/60 border border-slate-600/50 text-slate-300 rounded-xl text-xs flex items-center gap-2">
+                  <FileCode className="w-4 h-4 shrink-0 text-indigo-400" />
+                  <span>{importStructureNote}</span>
+                </div>
+              )}
+
+              {/* REJECTED RECORDS: nunca se descartan en silencio */}
+              {importRejected.length > 0 && (
+                <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-300 rounded-xl text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                    <span>{importRejected.length} registro(s) no importable(s) con seguridad (no se importarán):</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-red-300/80">
+                    {importRejected.slice(0, 3).map((r) => (
+                      <li key={`${r.index}-${r.key}`}>{r.key}: {r.reason}</li>
+                    ))}
+                    {importRejected.length > 3 && <li>…y {importRejected.length - 3} más.</li>}
+                  </ul>
+                </div>
+              )}
+
+              {/* WARNINGS: campos no informados; no se inventan datos */}
+              {importWarnings.length > 0 && (
+                <div className="p-3 bg-amber-950/30 border border-amber-500/30 text-amber-200 rounded-xl text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span>{importWarnings.length} aviso(s) de datos no informados en el archivo (no se inventan importes, fechas, titulares ni relaciones):</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-amber-200/80">
+                    {importWarnings.slice(0, 3).map((w) => (
+                      <li key={`${w.index}-${w.key}-${w.reason}`}>{w.key}: {w.reason}</li>
+                    ))}
+                    {importWarnings.length > 3 && <li>…y {importWarnings.length - 3} más.</li>}
+                  </ul>
                 </div>
               )}
 
