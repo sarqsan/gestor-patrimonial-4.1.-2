@@ -17,6 +17,7 @@ import {
   estimatePayloadBytes,
   PORTFOLIO_DOC_SAFE_BYTES,
   sanitizeFileName,
+  WORD_DOCUMENT_MIME,
 } from "./attachmentRules";
 import { isDataUrl, parseDataUrl, estimateDataUrlBytes } from "./legacyDataUrl";
 
@@ -30,8 +31,13 @@ export interface LegacyAttachmentRecord {
   propertyId?: string;
   expenseId?: string;
   docId?: string;
+  /** Nombre saneado usado para la ruta de Storage (nunca se escribe en el registro). */
   fileName: string;
+  /** Nombre histórico tal y como está en el registro; null si el registro no lo declaraba. */
+  displayName: string | null;
   contentType: string;
+  /** Procedencia del tipo de contenido. 'unknown' => no se declara en ninguna parte: no se inventa. */
+  contentTypeSource: "record" | "data-url" | "unknown";
   dataUrl: string;
   dataBytes: number; // tamaño binario estimado/decodificado
   dataUrlLength: number; // longitud de la cadena data URL (lo que ocupa en Firestore)
@@ -82,29 +88,46 @@ export interface MigrationResult {
 // Inventario puro (sin I/O)
 // ---------------------------------------------------------------------------
 
-function safeFileNameFromExpense(exp: PropertyExpense): string {
+/**
+ * Extensión coherente con el tipo de contenido REAL del adjunto.
+ * Solo se usa cuando el registro histórico no declaraba nombre de fichero.
+ */
+export function extensionFromContentType(contentType: string): string {
+  const t = (contentType || "").toLowerCase();
+  if (t === "application/pdf") return ".pdf";
+  if (t === WORD_DOCUMENT_MIME) return ".doc";
+  if (t === "image/png") return ".png";
+  if (t === "image/webp") return ".webp";
+  if (t === "image/gif") return ".gif";
+  if (t.startsWith("image/")) return ".jpg";
+  return "";
+}
+
+/**
+ * Tipo de contenido con su procedencia. Nunca se inventa: si ni el registro ni la
+ * data URL lo declaran, se devuelve 'unknown' y la comprobación de reglas de
+ * Storage lo detendrá con un motivo honesto en lugar de subir bytes mal etiquetados.
+ */
+function contentTypeOf(
+  fromRecord: string | undefined,
+  parsed: { mimeType: string } | null
+): { contentType: string; source: "record" | "data-url" | "unknown" } {
+  if (fromRecord && fromRecord.trim()) return { contentType: fromRecord.trim(), source: "record" };
+  // parseDataUrl devuelve "application/octet-stream" cuando la data URL no declara tipo:
+  // es lo que dice el dato, no una invención, y las reglas de Storage lo rechazarán.
+  if (parsed?.mimeType) return { contentType: parsed.mimeType, source: "data-url" };
+  return { contentType: "", source: "unknown" };
+}
+
+/** Nombre para la RUTA de Storage: el histórico si existe; si no, uno derivado del tipo real. */
+function storageFileNameFromExpense(exp: PropertyExpense, contentType: string): string {
   if (exp.receiptName && exp.receiptName.trim()) return exp.receiptName.trim();
-  const ext = exp.receiptType?.includes("pdf") ? ".pdf" : exp.receiptType?.includes("png") ? ".png" : exp.receiptType?.includes("jpeg") || exp.receiptType?.includes("jpg") ? ".jpg" : ".pdf";
-  return `comprobante_${exp.id}${ext}`;
+  return `comprobante_${exp.id}${extensionFromContentType(contentType)}`;
 }
 
-function safeFileNameFromDoc(doc: PropertyDocument): string {
+function storageFileNameFromDoc(doc: PropertyDocument, contentType: string): string {
   if (doc.name && doc.name.trim()) return doc.name.trim();
-  const ext = doc.type?.includes("pdf") ? ".pdf" : ".png";
-  return `documento_${doc.id}${ext}`;
-}
-
-function contentTypeFromExpense(exp: PropertyExpense, parsed: { mimeType: string } | null): string {
-  if (exp.receiptType) return exp.receiptType;
-  if (parsed?.mimeType) return parsed.mimeType;
-  return "application/pdf";
-}
-
-function contentTypeFromDoc(doc: PropertyDocument, parsed: { mimeType: string } | null): string {
-  if (doc.type) return doc.type;
-  if (doc.contentType) return doc.contentType;
-  if (parsed?.mimeType) return parsed.mimeType;
-  return "application/pdf";
+  return `documento_${doc.id}${extensionFromContentType(contentType)}`;
 }
 
 export function buildInventory(portfolio: AppState, userId: string): MigrationInventory {
@@ -118,7 +141,8 @@ export function buildInventory(portfolio: AppState, userId: string): MigrationIn
       const dataUrl = exp.receiptUrl as string;
       const parsed = parseDataUrl(dataUrl);
       const binaryBytes = parsed ? parsed.sizeBytes : estimateDataUrlBytes(dataUrl);
-      const fileName = safeFileNameFromExpense(exp);
+      const { contentType, source } = contentTypeOf(exp.receiptType, parsed);
+      const fileName = storageFileNameFromExpense(exp, contentType);
       const folder: AttachmentFolder = "expenses";
       const storagePath = attachmentStoragePath(userId, folder, exp.id, fileName);
       attachments.push({
@@ -127,7 +151,9 @@ export function buildInventory(portfolio: AppState, userId: string): MigrationIn
         propertyId: exp.propertyId,
         expenseId: exp.id,
         fileName: sanitizeFileName(fileName),
-        contentType: contentTypeFromExpense(exp, parsed),
+        displayName: exp.receiptName && exp.receiptName.trim() ? exp.receiptName : null,
+        contentType,
+        contentTypeSource: source,
         dataUrl,
         dataBytes: binaryBytes,
         dataUrlLength: dataUrl.length,
@@ -143,7 +169,8 @@ export function buildInventory(portfolio: AppState, userId: string): MigrationIn
         const dataUrl = doc.fileData as string;
         const parsed = parseDataUrl(dataUrl);
         const binaryBytes = parsed ? parsed.sizeBytes : estimateDataUrlBytes(dataUrl);
-        const fileName = safeFileNameFromDoc(doc);
+        const { contentType, source } = contentTypeOf(doc.type || doc.contentType, parsed);
+        const fileName = storageFileNameFromDoc(doc, contentType);
         const folder: AttachmentFolder = "property-documents";
         const storagePath = attachmentStoragePath(userId, folder, doc.id, fileName);
         attachments.push({
@@ -152,7 +179,9 @@ export function buildInventory(portfolio: AppState, userId: string): MigrationIn
           propertyId: prop.id,
           docId: doc.id,
           fileName: sanitizeFileName(fileName),
-          contentType: contentTypeFromDoc(doc, parsed),
+          displayName: doc.name && doc.name.trim() ? doc.name : null,
+          contentType,
+          contentTypeSource: source,
           dataUrl,
           dataBytes: binaryBytes,
           dataUrlLength: dataUrl.length,
@@ -226,30 +255,31 @@ export function rewritePortfolioWithReferences(
     else pathByDocId.set(a.docId!, a);
   }
 
-  const newExpenses = (portfolio.expenses || []).map((exp) => {
+  const newExpenses = (portfolio.expenses || []).map((exp): PropertyExpense => {
     const rec = pathByExpenseId.get(exp.id);
     if (!rec) return exp;
-    // Conserva id, propertyId, amount, date, description, etc. Sustituye solo adjunto.
-    return {
-      ...exp,
-      receiptUrl: undefined,
-      receiptPath: rec.storagePath,
-      receiptName: rec.fileName,
-      receiptType: rec.contentType,
-    };
+    // Se conserva TODO el registro (id, propertyId, amount, date, description y el
+    // nombre histórico del comprobante). Solo se retira el Base64 —eliminando la clave,
+    // que es lo que Firestore admite— y se añade la referencia ya verificada.
+    const { receiptUrl: _legacy, ...rest } = exp;
+    const next: PropertyExpense = { ...rest, receiptPath: rec.storagePath };
+    // El nombre y el tipo solo se rellenan si el registro no los tenía Y se conocen de
+    // verdad (del propio registro o de la data URL): nunca se inventan.
+    if (!next.receiptName && rec.displayName) next.receiptName = rec.displayName;
+    if (!next.receiptType && rec.contentTypeSource !== "unknown") next.receiptType = rec.contentType;
+    return next;
   });
 
   const newProperties = (portfolio.properties || []).map((prop) => {
-    const newDocs = (prop.documents || []).map((doc) => {
+    const newDocs = (prop.documents || []).map((doc): PropertyDocument => {
       const rec = pathByDocId.get(doc.id);
       if (!rec) return doc;
-      return {
-        ...doc,
-        fileData: undefined,
-        storagePath: rec.storagePath,
-        name: rec.fileName,
-        contentType: rec.contentType,
-      };
+      // Idem: el nombre histórico del documento no se sanea ni se sustituye.
+      const { fileData: _legacy, ...rest } = doc;
+      const next: PropertyDocument = { ...rest, storagePath: rec.storagePath };
+      if (!next.name && rec.displayName) next.name = rec.displayName;
+      if (!next.contentType && rec.contentTypeSource !== "unknown") next.contentType = rec.contentType;
+      return next;
     });
     return { ...prop, documents: newDocs };
   });
