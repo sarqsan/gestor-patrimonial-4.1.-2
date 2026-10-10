@@ -26,7 +26,7 @@ import {
 } from "./portfolioMigration";
 import { checkPortfolioWrite, collectInlineDataUrls } from "./portfolioGuard";
 import { parseDataUrl } from "./legacyDataUrl";
-import { MAX_BACKUP_BYTES, portfolioBackupStoragePath } from "./attachmentRules";
+import { MAX_BACKUP_BYTES, portfolioBackupStoragePath, storageRuleProblem } from "./attachmentRules";
 import { portfolioRawHash, sha256Hex, stableStringify, utf8Bytes } from "./stableHash";
 
 export const MIGRATION_SCHEMA = "rentasync.portfolio-attachments-v1";
@@ -214,6 +214,11 @@ export async function runPortfolioAttachmentMigration(params: {
     for (const att of inventory.attachments) {
       const parsed = parseDataUrl(att.dataUrl);
       if (!parsed) return failed(`El adjunto ${att.attachmentId} no es un Base64 válido. No se ha escrito nada.`);
+      // Mismas condiciones que storage.rules: si no cabe, se detiene ANTES de crear la copia de seguridad.
+      const problem = storageRuleProblem({ size: parsed.bytes.length, contentType: att.contentType });
+      if (problem) {
+        return failed(`El adjunto ${att.attachmentId} no se puede guardar en Storage: ${problem}. No se ha escrito nada.`);
+      }
       prepared.push({
         attachmentId: att.attachmentId,
         storagePath: att.storagePath,

@@ -54,6 +54,20 @@ export function validateAttachment(
   return null;
 }
 
+/**
+ * Comprueba un objeto ya existente (p. ej. un adjunto histórico) contra las mismas condiciones
+ * que storage.rules para `create`. Devuelve null si cabe, o el motivo. Un tamaño 0 sí se admite
+ * (la regla no lo rechaza) y la validación de "archivo vacío" es solo de la UI.
+ */
+export function storageRuleProblem(file: { size: number; contentType: string }): string | null {
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    return `supera el límite de ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB`;
+  }
+  const t = file.contentType;
+  const allowed = t === "application/pdf" || t === WORD_DOCUMENT_MIME || t.startsWith("image/");
+  return allowed ? null : `tipo no admitido por las reglas de Storage (${t || "sin tipo"})`;
+}
+
 /** Nombre de fichero seguro para usar en una ruta de Storage. */
 export function sanitizeFileName(name: string): string {
   const cleaned = name

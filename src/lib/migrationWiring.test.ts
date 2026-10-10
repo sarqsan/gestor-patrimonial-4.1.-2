@@ -133,6 +133,29 @@ test("reglas de Storage: copias solo crear/leer, sin borrado ni acceso público"
   assert.doesNotMatch(rules, /allow read: if true/);
   assert.match(rules, /backups\/\{allPaths=\*\*\}[\s\S]*?allow update, delete: if false/);
   assert.match(rules, /contentType == 'application\/json'/);
-  assert.match(rules, /allow delete: if false/);
   assert.match(rules, /request\.auth != null/);
+});
+
+test("reglas de Storage: adjuntos solo crear; nunca sobrescribir ni borrar", () => {
+  const rules = read("storage.rules");
+  const attachments = rules.match(/attachments\/\{allPaths=\*\*\}\s*\{[\s\S]*?\n    \}/)?.[0] ?? "";
+  assert.ok(attachments.length > 0, "bloque de adjuntos presente");
+  assert.match(attachments, /allow create: if request\.auth != null/);
+  assert.doesNotMatch(attachments, /allow create, update/);
+  assert.doesNotMatch(attachments, /allow [^:]*update[^:]*:\s*if (?!false)/, "ningún allow de update con condición");
+  assert.match(attachments, /allow update, delete: if false/);
+  assert.match(attachments, /request\.resource\.size <= 10 \* 1024 \* 1024/);
+});
+
+test("importación reutiliza objetos idénticos: ninguna ruta de adjuntos depende de sobrescribir", () => {
+  const attachments = read("src/lib/attachments.ts");
+  assert.match(attachments, /storeVerifiedObject\(port/);
+  const migration = read("src/lib/portfolioMigrationRun.ts");
+  // La migración lee antes de subir y nunca sube sobre un objeto existente.
+  assert.match(migration, /const existing = await storage\.readBytes\(item\.storagePath\)/);
+  assert.match(migration, /if \(!bytesEqual\(existing, item\.bytes\)\)/);
+  // La comprobación de tipo y tamaño se hace antes de crear la copia de seguridad.
+  const precheck = migration.indexOf("storageRuleProblem(");
+  const backup = migration.indexOf("// 3. Copia recuperable");
+  assert.ok(precheck > 0 && backup > precheck, "precheck antes de la copia");
 });

@@ -57,6 +57,29 @@ describe("cartera diagnosticada de arquero (fixture)", () => {
   });
 });
 
+describe("precheck de Storage antes de escribir nada", () => {
+  test("un adjunto que las reglas no admiten detiene la migración sin crear copia ni escribir la cartera", async () => {
+    const fx = buildArqueroFixture();
+    const bad = toDataUrl(fx.files[0].bytes, "application/x-msdownload");
+    // El tipo que verán las reglas es receiptType (declarado), que prevalece sobre el MIME del Base64.
+    const e0 = fx.state.expenses![0] as { receiptUrl?: string; receiptType?: string };
+    e0.receiptUrl = bad;
+    e0.receiptType = "application/x-msdownload";
+    const r0 = (fx.raw.expenses as Array<{ receiptUrl?: string; receiptType?: string }>)[0];
+    r0.receiptUrl = bad;
+    r0.receiptType = "application/x-msdownload";
+    const storage = new FakeStorage();
+    const store = new FakeStore(fx.raw);
+    const out = await runFor(fx, storage, store);
+    assert.equal(out.status, "failed");
+    assert.match(out.error ?? "", /no se puede guardar en Storage/);
+    assert.match(out.error ?? "", /No se ha escrito nada/);
+    assert.equal(storage.uploadCalls.length, 0, "ni copia ni adjuntos subidos");
+    assert.equal(store.replaceCalls, 0, "la cartera no se escribe");
+    assert.equal(store.records.size, 0, "sin registro de migración");
+  });
+});
+
 describe("migración completa de arquero", () => {
   test("migra los cuatro adjuntos, verifica byte a byte y deja la cartera por debajo del umbral seguro", async () => {
     const fx = buildArqueroFixture();

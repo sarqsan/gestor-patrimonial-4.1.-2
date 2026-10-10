@@ -12,6 +12,7 @@ import {
   validateAttachment,
   MAX_ATTACHMENT_BYTES,
 } from "./attachmentRules";
+import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./verifiedObjectStore";
 
 export class AttachmentError extends Error {}
 
@@ -123,25 +124,37 @@ export async function uploadBytesVerified(opts: {
 }): Promise<StoredAttachment> {
   await ensureSignedIn();
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, opts.attachmentId, opts.fileName);
-  try {
-    await withTimeout(
-      uploadBytes(ref(storage, storagePath), new Blob([opts.bytes], { type: opts.contentType }), { contentType: opts.contentType }),
-      UPLOAD_TIMEOUT_MS,
-      "La subida del archivo ha superado el tiempo de espera. No se ha guardado la operación; inténtalo de nuevo."
-    );
-    const back = new Uint8Array(
+  // Sin `update` en las reglas: si el objeto ya existe con el mismo contenido (reimportación),
+  // se reutiliza; si existe con otro contenido, se aborta sin sobrescribir.
+  const port: VerifiedObjectPort = {
+    async read(path) {
+      try {
+        return new Uint8Array(
+          await withTimeout(
+            getStorageBytes(ref(storage, path), MAX_ATTACHMENT_BYTES),
+            UPLOAD_TIMEOUT_MS,
+            "La verificación del archivo ha superado el tiempo de espera. No se ha guardado la operación."
+          )
+        );
+      } catch (err) {
+        if ((err as { code?: string })?.code === "storage/object-not-found") return null;
+        throw err;
+      }
+    },
+    async create(path, bytes, contentType) {
       await withTimeout(
-        getStorageBytes(ref(storage, storagePath), MAX_ATTACHMENT_BYTES),
+        uploadBytes(ref(storage, path), new Blob([bytes], { type: contentType }), { contentType }),
         UPLOAD_TIMEOUT_MS,
-        "La verificación del archivo ha superado el tiempo de espera. No se ha guardado la operación."
-      )
-    );
-    if (back.length !== opts.bytes.length || back.some((b, i) => b !== opts.bytes[i])) {
-      throw new AttachmentError("La verificación del archivo subido ha fallado: el contenido no coincide. La operación no se ha guardado.");
-    }
+        "La subida del archivo ha superado el tiempo de espera. No se ha guardado la operación; inténtalo de nuevo."
+      );
+    },
+  };
+  try {
+    await storeVerifiedObject(port, { path: storagePath, bytes: opts.bytes, contentType: opts.contentType });
   } catch (err) {
     console.error("Verified upload failed:", storagePath, err);
     if (err instanceof AttachmentError) throw err;
+    if (err instanceof ObjectConflictError) throw new AttachmentError(err.message);
     throw new AttachmentError(describeStorageError(err));
   }
   return { storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
