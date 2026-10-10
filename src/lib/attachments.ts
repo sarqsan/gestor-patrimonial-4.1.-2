@@ -2,7 +2,7 @@
 // New attachments are stored in Storage and referenced from Firestore by storagePath only.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
 import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
-import { storage, authReady } from "./firebase";
+import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError } from "./firebase";
 import {
   AttachmentFolder,
   attachmentStoragePath,
@@ -31,13 +31,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 }
 
 async function ensureSignedIn(): Promise<void> {
-  const ok = await withTimeout(
-    authReady,
-    AUTH_TIMEOUT_MS,
-    "No se ha podido conectar con Firebase (tiempo de espera agotado). Comprueba la conexión e inténtalo de nuevo."
-  );
-  if (!ok) {
-    throw new AttachmentError("No se ha podido iniciar la sesión anónima de Firebase; el archivo no se ha subido.");
+  if (auth?.currentUser) {
+    return;
+  }
+
+  try {
+    await withTimeout(
+      ensureFirebaseAuth(),
+      AUTH_TIMEOUT_MS,
+      "No se ha podido conectar con Firebase (tiempo de espera agotado). Comprueba la conexión e inténtalo de nuevo."
+    );
+  } catch (err: any) {
+    if (err instanceof AttachmentError) {
+      throw err;
+    }
+    const code = err?.code || "";
+    const detail = describeAuthError(err);
+    const msg = code
+      ? `No se ha podido iniciar la sesión anónima de Firebase (${code}: ${detail}); el archivo no se ha subido.`
+      : `No se ha podido iniciar la sesión anónima de Firebase (${detail}); el archivo no se ha subido.`;
+    throw new AttachmentError(msg);
   }
 }
 

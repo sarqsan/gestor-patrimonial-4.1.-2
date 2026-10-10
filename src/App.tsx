@@ -786,11 +786,14 @@ export default function App() {
   };
 
   // BULK IMPORT EXPENSES & INCOMES
-  const handleImportExpenses = (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => {
+  const handleImportExpenses = async (newExpenses: PropertyExpense[], mode: 'merge' | 'replace'): Promise<{ ok: boolean; savedCount: number; errors: string[] }> => {
+    let finalExpenses: PropertyExpense[] = [];
+    let toSaveInDb: PropertyExpense[] = [];
+
     updateState((prev) => {
-      let finalExpenses: PropertyExpense[];
       if (mode === 'replace') {
         finalExpenses = newExpenses.map(e => ({ ...e, status: "pending" as const }));
+        toSaveInDb = finalExpenses;
       } else {
         // Conciliación idempotente por ID y firma contable: NUNCA duplicar
         const existingIds = new Set((prev.expenses || []).map(e => e.id));
@@ -806,25 +809,7 @@ export default function App() {
           }
         }
         finalExpenses = [...(prev.expenses || []), ...deduplicatedNew];
-      }
-
-      // Guardar lote en Firestore subcolección
-      if (state.currentUser && finalExpenses.length > 0) {
-        batchSaveMovements(state.currentUser, finalExpenses)
-          .then((res) => {
-            if (res.ok) {
-              updateState((p) => ({
-                ...p,
-                expenses: (p.expenses || []).map((e) => ({ ...e, status: "synced" })),
-              }));
-              triggerNotification(`✓ ${res.savedCount} movimientos persistidos en Firebase`);
-            } else {
-              triggerNotification(`⚠ Importación guardada parcialmente: ${res.errors.join(", ")}`);
-            }
-          })
-          .catch((err) => {
-            console.error("Error en batchSaveMovements:", err);
-          });
+        toSaveInDb = deduplicatedNew;
       }
 
       return {
@@ -833,14 +818,41 @@ export default function App() {
       };
     });
 
+    // Guardar lote en Firestore subcolección esperando confirmación
+    if (state.currentUser && toSaveInDb.length > 0) {
+      try {
+        const res = await batchSaveMovements(state.currentUser, toSaveInDb);
+        if (res.ok) {
+          updateState((p) => ({
+            ...p,
+            expenses: (p.expenses || []).map((e) => ({ ...e, status: "synced" })),
+          }));
+          triggerNotification(`✓ ${res.savedCount} movimientos persistidos en Firebase`);
+          addSyncEvent(
+            "Gestión de Gastos",
+            "Perfil & Firestore Cloud",
+            `Importadas ${newExpenses.length} operaciones`,
+            `Se han integrado masivamente ${newExpenses.length} gastos/ingresos en el perfil activo.`
+          );
+          return { ok: true, savedCount: res.savedCount, errors: [] };
+        } else {
+          triggerNotification(`⚠ Importación guardada parcialmente: ${res.errors.join(", ")}`);
+          return { ok: false, savedCount: res.savedCount, errors: res.errors };
+        }
+      } catch (err: any) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("Error en batchSaveMovements:", err);
+        return { ok: false, savedCount: 0, errors: [msg] };
+      }
+    }
+
     addSyncEvent(
       "Gestión de Gastos",
       "Perfil & Firestore Cloud",
       `Importadas ${newExpenses.length} operaciones`,
       `Se han integrado masivamente ${newExpenses.length} gastos/ingresos en el perfil activo.`
     );
-
-    triggerNotification(`📥 ¡${newExpenses.length} operaciones contables importadas con éxito!`);
+    return { ok: true, savedCount: toSaveInDb.length, errors: [] };
   };
 
   // BULK IMPORT PROPERTIES

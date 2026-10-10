@@ -25,7 +25,7 @@ import {
   onSnapshot, 
   Firestore 
 } from "firebase/firestore";
-import { db as defaultDb, auth } from "./firebase";
+import { db as defaultDb, auth, ensureFirebaseAuth } from "./firebase";
 
 function resolveDb(provided?: Firestore): Firestore {
   return provided || defaultDb;
@@ -150,6 +150,16 @@ export async function saveMovement(
   }
 
   try {
+    // Garantizar que la sesión de Firebase Auth está lista antes de escribir,
+    // de forma que ownerUid quede vinculado al UID criptográfico real (firestore.rules)
+    if (!firestore && typeof window !== "undefined") {
+      try {
+        await ensureFirebaseAuth();
+      } catch (authErr) {
+        console.warn("[movementService] Advertencia de autenticación previa a saveMovement:", authErr);
+      }
+    }
+
     const db = resolveDb(firestore);
     const docRef = doc(db, "users", userId, "expenses", movement.id);
     const dataToSave = sanitizeMovementForFirestore(movement, userId);
@@ -324,6 +334,16 @@ export async function batchSaveMovements(
     seenIds.add(m.id);
     seenSignatures.add(sig);
     uniqueMovements.push(m);
+  }
+
+  // Garantizar que la sesión de Firebase Auth está lista antes del lote,
+  // asegurando que cada movimiento registre el ownerUid del usuario autenticado
+  if (!firestore && typeof window !== "undefined") {
+    try {
+      await ensureFirebaseAuth();
+    } catch (authErr) {
+      console.warn("[movementService] Advertencia de autenticación previa a batchSaveMovements:", authErr);
+    }
   }
 
   const db = resolveDb(firestore);

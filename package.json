@@ -9,7 +9,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/lib/attachments.test.ts src/lib/apiResponse.test.ts src/lib/apiRoutes.test.ts src/lib/importParsers.test.ts src/lib/portfolioMigration.test.ts src/lib/portfolioGuard.test.ts src/lib/portfolioMigrationRun.test.ts src/lib/migrationWiring.test.ts src/lib/verifiedObjectStore.test.ts src/lib/expensesPersistence.test.ts src/lib/dateUtils.test.ts src/lib/recoveryImport.test.ts src/lib/movementService.test.ts"
+    "test": "node --import tsx --test src/lib/attachments.test.ts src/lib/apiResponse.test.ts src/lib/apiRoutes.test.ts src/lib/importParsers.test.ts src/lib/portfolioMigration.test.ts src/lib/portfolioGuard.test.ts src/lib/portfolioMigrationRun.test.ts src/lib/migrationWiring.test.ts src/lib/verifiedObjectStore.test.ts src/lib/expensesPersistence.test.ts src/lib/dateUtils.test.ts src/lib/recoveryImport.test.ts src/lib/movementService.test.ts src/lib/firebaseAuthAndUpload.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
