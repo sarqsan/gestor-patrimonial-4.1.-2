@@ -34,6 +34,29 @@ Las rutas de importación y restauración externalizan antes los Base64 (`src/li
 Es idempotente y reanudable. El panel exige escribir `MIGRAR <usuario>` para ejecutarla.
 La restauración desde la copia exige `RESTAURAR <usuario>`.
 
+### Fidelidad de los metadatos históricos
+
+La migración **solo** retira el Base64 y añade la referencia verificada; no reescribe nada más:
+
+- `receiptName` (gastos) y `name` (documentos de inmueble) se conservan **tal cual**, con sus espacios,
+  acentos y símbolos. El saneado se aplica únicamente a la ruta de Storage, nunca al registro: son los
+  nombres que muestran la interfaz, la descarga y el paquete ZIP para la AEAT.
+- Si el registro histórico no declaraba nombre, **no se inventa**: la clave sigue ausente y cada pantalla
+  usa su propio nombre de descarga derivado (`comprobante_{id}`, `factura_{fecha}_{inmueble}…`).
+- El tipo de contenido procede del registro (`receiptType` / `type` / `contentType`) o de la propia data URL.
+  Si ninguna fuente lo declara, se marca como desconocido y el precheck de reglas lo detiene con un motivo
+  honesto, en lugar de subirlo como `application/pdf` y etiquetar mal los bytes.
+- Las claves `receiptUrl` / `fileData` se **eliminan** del objeto (no se dejan en `undefined`, que Firestore
+  rechaza en las escrituras).
+
+### Limitación conocida
+
+Si un adjunto histórico no se puede guardar en Storage (tipo no admitido por las reglas, más de 10 MB o
+Base64 ilegible), la migración **se detiene antes de escribir nada** y lo indica con el identificador y el
+motivo. No se borra ni se aísla ese contenido: el documento original queda intacto. En ese caso hay que
+resolver primero ese fichero (por ejemplo, volver a adjuntarlo desde la pantalla correspondiente, que sí lo
+sube a Storage) y repetir la migración.
+
 ## Requisitos de despliegue previos a la migración real
 
 1. **Publicar `storage.rules`** en el proyecto `startup-sanctuary-sln7n` (rutas `attachments/**` y `backups/**`).

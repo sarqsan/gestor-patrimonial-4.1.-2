@@ -527,3 +527,78 @@ describe("aplicación del resultado a la pantalla", () => {
     assert.equal(collectInlineDataUrls(merged).length, 0, "sin Base64 tras aplicar las referencias");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Metadatos históricos: la migración completa no los reescribe
+// ---------------------------------------------------------------------------
+
+describe("metadatos históricos en la migración completa", () => {
+  test("los nombres con espacios, acentos y símbolos llegan intactos al documento escrito", async () => {
+    const fx = buildArqueroFixture({ sizes: [40_000, 40_001, 40_002, 40_003] });
+    const nombres: Record<string, string> = {
+      exp_0: "Factura IBI 2026 (Alicante).pdf",
+      exp_1: "Reparación caldera — factura nº12.png",
+      doc_0: "Escritura de compra (copia).pdf",
+      doc_1: "Póliza seguro hogar 2026.pdf",
+    };
+    // Mismo cambio en la cartera en pantalla y en el documento que está en la nube.
+    const renombrar = (obj: any) => {
+      for (const e of obj.expenses ?? []) if (nombres[e.id]) e.receiptName = nombres[e.id];
+      for (const p of obj.properties ?? []) for (const d of p.documents ?? []) if (nombres[d.id]) d.name = nombres[d.id];
+    };
+    renombrar(fx.state);
+    renombrar(fx.raw);
+
+    const storage = new FakeStorage();
+    const store = new FakeStore(fx.raw);
+    const out = await runFor(fx, storage, store);
+    assert.equal(out.status, "completed", out.error);
+
+    const escrito = store.raw!;
+    const expenses = escrito.expenses as PropertyExpense[];
+    const docs = (escrito.properties as Array<{ documents?: Array<{ id: string; name: string }> }>).flatMap(
+      (p) => p.documents ?? []
+    );
+    for (const [id, nombre] of Object.entries(nombres)) {
+      const exp = expenses.find((e) => e.id === id);
+      if (exp) assert.equal(exp.receiptName, nombre, `receiptName histórico conservado en ${id}`);
+      const doc = docs.find((d) => d.id === id);
+      if (doc) assert.equal(doc.name, nombre, `name histórico conservado en ${id}`);
+    }
+
+    // Las rutas de los adjuntos van saneadas (sin espacios ni símbolos).
+    // En Storage hay 5 objetos: los 4 adjuntos + la copia de seguridad JSON de la cartera.
+    const attachmentPaths = [...storage.objects.keys()].filter((p) => p.includes("/attachments/"));
+    assert.equal(attachmentPaths.length, 4);
+    assert.equal([...storage.objects.keys()].filter((p) => p.includes("/backups/")).length, 1);
+    for (const path of attachmentPaths) {
+      assert.ok(!path.includes(" "), `ruta saneada: ${path}`);
+      assert.ok(!/[—º]/.test(path), `ruta sin símbolos: ${path}`);
+    }
+
+    // Sin Base64 en el documento y con los bytes originales en Storage.
+    assert.deepEqual(collectInlineDataUrls(escrito), []);
+    for (const f of fx.files) {
+      const path = attachmentPaths.find((p) => p.includes(`/${f.attachmentId}/`));
+      assert.ok(path, `objeto de ${f.attachmentId}`);
+      assert.ok(storage.objects.get(path!)!.bytes.every((b, i) => b === f.bytes[i]), "contenido idéntico");
+    }
+  });
+
+  test("un adjunto histórico sin nombre no recibe un nombre inventado en el documento", async () => {
+    const fx = buildArqueroFixture({ sizes: [20_000, 20_001, 20_002, 20_003] });
+    delete (fx.state.expenses![0] as PropertyExpense).receiptName;
+    delete (fx.raw.expenses as Array<Record<string, unknown>>)[0].receiptName;
+
+    const storage = new FakeStorage();
+    const store = new FakeStore(fx.raw);
+    const out = await runFor(fx, storage, store);
+    assert.equal(out.status, "completed", out.error);
+
+    const exp0 = (store.raw!.expenses as PropertyExpense[]).find((e) => e.id === "exp_0")!;
+    assert.equal("receiptName" in exp0, false, "no se inventa comprobante_exp_0.pdf");
+    assert.ok(exp0.receiptPath, "sí tiene su referencia verificada");
+    // La interfaz ya resuelve un nombre de descarga cuando el registro no lo tiene.
+    assert.equal(exp0.receiptName, undefined);
+  });
+});

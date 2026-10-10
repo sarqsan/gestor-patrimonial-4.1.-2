@@ -10,6 +10,7 @@ import {
   PORTFOLIO_DOC_SAFE_BYTES,
   hasReceipt,
   isInlineDataUrl,
+  storageRuleProblem,
 } from "./attachmentRules";
 import {
   buildInventory,
@@ -416,4 +417,119 @@ test("el documento principal queda por debajo del límite con margen tras migrac
   assert.equal(result.success, true);
   assert.ok(result.finalBytes! < PORTFOLIO_DOC_SAFE_BYTES, `final ${result.finalBytes} debe ser < ${PORTFOLIO_DOC_SAFE_BYTES}`);
   assert.ok(result.finalBytes! < PORTFOLIO_DOC_SAFE_BYTES * 0.8, "con margen suficiente (<80%)");
+});
+
+// ---------------------------------------------------------------------------
+// Fidelidad de los metadatos históricos: la migración no los reescribe ni inventa
+// ---------------------------------------------------------------------------
+
+const B64_PDF = Buffer.from("contenido de un justificante histórico").toString("base64");
+const B64_PNG = Buffer.from("bytes de una imagen histórica").toString("base64");
+
+describe("fidelidad de los metadatos históricos", () => {
+  test("conserva el nombre histórico con espacios, acentos y paréntesis (solo la ruta se sanea)", () => {
+    const exp = makeLegacyExpense("exp_1", "p1", B64_PDF, "Factura IBI 2026 (Alicante).pdf");
+    const doc = makeLegacyDoc("doc_1", "Escritura de compra — copia nº2.pdf", B64_PDF);
+    const state = baseState({ properties: [makeProperty("p1", [doc])], expenses: [exp] });
+
+    const inv = buildInventory(state, "arquero");
+    const migrated = rewritePortfolioWithReferences(state, inv);
+
+    assert.equal(migrated.expenses![0].receiptName, "Factura IBI 2026 (Alicante).pdf", "nombre del comprobante intacto");
+    assert.equal(migrated.properties[0].documents![0].name, "Escritura de compra — copia nº2.pdf", "nombre del documento intacto");
+    assert.equal(migrated.properties[0].documents![0].size, "1 KB", "el tamaño histórico mostrado no se toca");
+    assert.equal(migrated.properties[0].documents![0].uploadDate, "2025-05-01");
+    assert.equal(migrated.expenses![0].amount, 120);
+    assert.equal(migrated.expenses![0].date, "2025-03-10");
+
+    // La ruta de Storage sí va saneada (sin espacios ni caracteres problemáticos).
+    for (const rec of inv.attachments) {
+      assert.ok(!rec.storagePath.includes(" "), `ruta saneada: ${rec.storagePath}`);
+      assert.equal(rec.displayName !== null, true);
+    }
+    assert.match(inv.attachments[0].storagePath, /Factura_IBI_2026_Alicante_\.pdf$/);
+  });
+
+  test("no inventa nombre: un adjunto histórico sin receiptName se migra sin él", () => {
+    const exp: PropertyExpense = {
+      id: "exp_sin_nombre",
+      propertyId: "p1",
+      category: "ibi",
+      amount: 10,
+      date: "2025-01-01",
+      receiptUrl: `data:image/png;base64,${B64_PNG}`,
+    };
+    const state = baseState({ expenses: [exp] });
+    const inv = buildInventory(state, "arquero");
+    const rec = inv.attachments[0];
+
+    assert.equal(rec.displayName, null, "no había nombre histórico que conservar");
+    assert.equal(rec.contentType, "image/png", "el tipo sale de la data URL");
+    assert.equal(rec.contentTypeSource, "data-url");
+    assert.match(rec.storagePath, /\.png$/, "la extensión derivada coincide con el tipo real, no es .pdf por defecto");
+
+    const migrated = rewritePortfolioWithReferences(state, inv);
+    const e = migrated.expenses![0];
+    assert.equal("receiptName" in e, false, "no se inventa un nombre de fichero");
+    assert.equal(e.receiptPath, rec.storagePath);
+    assert.equal(e.receiptType, "image/png");
+    assert.equal(e.receiptUrl, undefined);
+  });
+
+  test("no inventa el tipo de contenido: sin tipo real se informa como desconocido y Storage lo detiene", () => {
+    // Data URL sin MIME declarado: parseDataUrl informa application/octet-stream (el dato, no una invención).
+    const sinTipo: PropertyExpense = {
+      id: "exp_sin_tipo",
+      propertyId: "p1",
+      category: "ibi",
+      amount: 10,
+      date: "2025-01-01",
+      receiptUrl: `data:;base64,${B64_PDF}`,
+    };
+    const inv = buildInventory(baseState({ expenses: [sinTipo] }), "arquero");
+    const rec = inv.attachments[0];
+    assert.equal(rec.contentType, "application/octet-stream");
+    assert.notEqual(rec.contentType, "application/pdf", "no se fuerza a PDF para que quepa en Storage");
+    const problem = storageRuleProblem({ size: rec.dataBytes, contentType: rec.contentType });
+    assert.ok(problem, "las reglas de Storage lo rechazan con un motivo honesto");
+    assert.match(problem!, /tipo no admitido/);
+
+    // Base64 ilegible y sin tipo en el registro: tipo desconocido, nunca inventado.
+    const raro: PropertyExpense = {
+      id: "exp_raro",
+      propertyId: "p1",
+      category: "ibi",
+      amount: 1,
+      date: "2025-01-01",
+      receiptUrl: "data:application/pdf;base64,@@no-es-base64@@",
+    };
+    const inv2 = buildInventory(baseState({ expenses: [raro] }), "arquero");
+    assert.equal(inv2.attachments[0].contentTypeSource, "unknown");
+    assert.equal(inv2.attachments[0].contentType, "");
+    assert.equal(parseDataUrl(raro.receiptUrl!), null);
+  });
+
+  test("la reescritura elimina la clave del Base64 en lugar de dejarla en undefined", () => {
+    const exp = makeLegacyExpense("exp_1", "p1", B64_PDF, "ibi.pdf");
+    const doc = makeLegacyDoc("doc_1", "Escritura.pdf", B64_PDF);
+    const state = baseState({ properties: [makeProperty("p1", [doc])], expenses: [exp] });
+
+    const migrated = rewritePortfolioWithReferences(state, buildInventory(state, "arquero"));
+
+    // Firestore rechaza cualquier valor undefined: las claves deben desaparecer.
+    const withUndefined: string[] = [];
+    const walk = (v: unknown, path: string) => {
+      if (v === undefined) return withUndefined.push(path);
+      if (Array.isArray(v)) return v.forEach((x, i) => walk(x, `${path}[${i}]`));
+      if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`);
+    };
+    walk(migrated, "$");
+    assert.deepEqual(withUndefined, [], "ninguna clave queda con undefined");
+
+    assert.equal("receiptUrl" in migrated.expenses![0], false, "la clave receiptUrl desaparece");
+    assert.equal("fileData" in migrated.properties[0].documents![0], false, "la clave fileData desaparece");
+    // Y el objeto sobrevive intacto a la serialización que hace la escritura real.
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(migrated)), JSON.parse(JSON.stringify(migrated)));
+    assert.deepEqual(assertNoDataUrls(migrated), []);
+  });
 });
