@@ -138,6 +138,76 @@ resuelto**:
 4. Confirmar que los gastos y comprobantes históricos siguen listándose y descargándose igual.
 5. No se debe realizar ninguna escritura real en producción sin autorización expresa.
 
+## Apéndice A — Auditoría de vías administrativas (segunda investigación, 2026-10-10)
+
+Investigación ordenada por la dirección para agotar las vías administrativas disponibles antes de
+declarar el bloqueo definitivo.
+
+### A.1. Estado del repositorio verificado antes de actuar
+
+- `origin/main` = `d5bfcc6d0686b453cf4217f54d9e463ba2965aa0` (commit de integración): **sin
+  cambios ajenos** posteriores que preservar.
+- Rama de diagnóstico en remoto = `2dd47af430f38c2d515275ba8661952e09064eb8`.
+  `git merge-base --is-ancestor 2dd47af origin/main` → **NO integrado** (correcto: es diagnóstico,
+  no solución).
+- Sin PRs abiertos. Working tree limpio. El diff de `2dd47af` toca exactamente 5 ficheros
+  (informe, registro de test, test nuevo, `firebase.ts`, `attachments.ts`): nada ajeno.
+
+### A.2. Herramientas y conexiones comprobadas (resultado: SIN ACCESO)
+
+| Vía comprobada | Resultado |
+| --- | --- |
+| Conectores de Arena `firebase`, `google-cloud`, `gcp`, `google` (`list_connector_tools`) | `unsupported` los cuatro; además no hay ninguna app conectada en la conversación |
+| CLIs `firebase`, `gcloud`, `gsutil`, `bq` en el entorno | No instalados |
+| Variables de entorno con credenciales (`GOOGLE_APPLICATION_CREDENTIALS`, `FIREBASE_TOKEN`, etc.) | Ninguna |
+| Configuraciones locales (`~/.config`, home) | Sin perfiles firebase/gcloud/google |
+| Credenciales de administración en el repositorio (búsqueda por patrones `service account`, `private_key`, `client_email`, `firebase-admin`…) | Ninguna |
+| Sonda de red SOLO LECTURA a `identitytoolkit`, `firebase`, `firestore`, `storage` y `oauth2` en `googleapis.com` | Inalcanzables (HTTP 000; el egress del entorno solo permite github.com, npm y pypi). Control: `api.github.com` responde HTTP 200 |
+
+**Distinción requerida**: no se puede **leer** la configuración de autenticación del proyecto, no
+se puede **modificar**, y no se dispone de **acceso** alguno. No se afirma nada sobre el estado
+real del proveedor anónimo en `startup-sanctuary-sln7n` porque no ha podido consultarse; solo está
+demostrado el rechazo `ADMIN_ONLY_OPERATION` del servicio (hecho de producción). Instalar
+`firebase-tools` no cambiaría nada: no hay red hacia Google ni credenciales con las que autenticarse.
+Los emuladores locales tampoco aplican: simularían un proyecto nuevo, no pueden ni consultar ni
+levantar la restricción del proyecto real.
+
+### A.3. Permiso/capacidad que falta
+
+Una identidad con rol **Owner o Editor** (o Firebase Admin delegado) del proyecto Google Cloud
+`startup-sanctuary-sln7n`, ejercida desde una red con acceso a
+`console.firebase.google.com` / APIs de Google. Ese es el único permiso que desbloquea la causa.
+
+### A.4. Acción administrativa concreta imprescindible
+
+En el proyecto `startup-sanctuary-sln7n`:
+
+1. Firebase Console → **Authentication → Sign-in method**: habilitar el proveedor **Anonymous**
+   si estuviera deshabilitado, y retirar cualquier restricción de tipo "solo administradores".
+2. Si el proyecto lo gobierna **Identity Platform** (Google Cloud → Identity Platform →
+   Settings): permitir el sign-in anónimo y revisar funciones de bloqueo/políticas que devuelvan
+   `ADMIN_ONLY_OPERATION`.
+3. Tras el cambio, verificar según la sección 6 de este informe (sesión real, escritura en
+   Firestore, subida y recuperación de un archivo de prueba, aislamiento entre usuarios).
+
+### A.5. Alternativas técnicas evaluadas y descartadas por las restricciones vigentes
+
+- **Cambiar la app a otro proyecto Firebase** donde el proveedor anónimo esté permitido: excluido
+  (prohibido cambiar el proyecto o el identificador de la base de datos; además abandonaría los
+  datos existentes, que no pueden migrarse).
+- **Google OAuth o email/contraseña de Firebase**: excluidos mientras no exista un diseño
+  compatible con la continuidad de identidad (datos claveados por usuario local, `isOwner` por
+  uid/email/username) y una evaluación de los datos afectados; el sign-up de Firebase es del mismo
+  tipo de operación que la restricción bloquea.
+- **Proxy de sesión con Admin SDK en el servidor**: excluido: requeriría credenciales privilegiadas
+  nuevas, y las escrituras de servidor eludirían las reglas por usuario, debilitando la frontera de
+  seguridad que la incidencia manda conservar.
+- **Emuladores de Firebase**: no consultan ni modifican el proyecto real; no resuelven nada.
+
+Conclusión: la única vía es la acción administrativa A.4, ejecutable únicamente por la
+administración del proyecto. Hasta que conste como aplicada, la incidencia permanece bloqueada y no
+se introducirán más cambios de cliente.
+
 ## 7. Datos y seguridad: garantías mantenidas
 
 - Proyecto Firebase e identificador de base de datos: sin cambios.
