@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
-import { uploadAttachment, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
+import { externalizeImportedExpenses } from "../lib/importAttachments";
 import {
   IMPORT_ACCEPT,
   validateImportFileName,
@@ -103,6 +104,7 @@ export default function Expenses({
   const [importRejected, setImportRejected] = useState<ImportIssue[]>([]);
   const [importWarnings, setImportWarnings] = useState<ImportIssue[]>([]);
   const [importStructureNote, setImportStructureNote] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   // Form states
   const [propertyId, setPropertyId] = useState("");
@@ -436,11 +438,26 @@ export default function Expenses({
     }
   };
 
-  const handleConfirmImport = () => {
-    if (!importPreviewData || importPreviewData.length === 0) return;
+  const handleConfirmImport = async () => {
+    if (!importPreviewData || importPreviewData.length === 0 || isImporting) return;
+    // Los comprobantes Base64 de la importación se suben a Storage ANTES de tocar la cartera.
+    let prepared: PropertyExpense[];
+    setIsImporting(true);
+    setImportError(null);
+    try {
+      if (!currentUser) throw new Error("No hay una sesión activa para importar los comprobantes.");
+      prepared = await externalizeImportedExpenses(importPreviewData, (req) =>
+        uploadBytesVerified({ userId: currentUser, ...req })
+      );
+    } catch (err) {
+      setIsImporting(false);
+      setImportError(err instanceof Error ? err.message : "No se han podido guardar los comprobantes. La importación se ha cancelado.");
+      return;
+    }
+    setIsImporting(false);
     if (onImportExpenses) {
-      onImportExpenses(importPreviewData, importMode);
-      setImportSuccessMsg(`Se han importado con éxito ${importPreviewData.length} registros contables.`);
+      onImportExpenses(prepared, importMode);
+      setImportSuccessMsg(`Se han importado con éxito ${prepared.length} registros contables.`);
       setTimeout(() => {
         setIsImportOpen(false);
         setImportPreviewData(null);
@@ -451,7 +468,7 @@ export default function Expenses({
       }, 1200);
     } else {
       // Fallback: add items one by one
-      importPreviewData.forEach(exp => onAddExpense(exp));
+      prepared.forEach(exp => onAddExpense(exp));
       setIsImportOpen(false);
       setImportPreviewData(null);
       setImportRejected([]);
@@ -1757,7 +1774,7 @@ export default function Expenses({
               <button
                 type="button"
                 onClick={handleConfirmImport}
-                disabled={!importPreviewData || importPreviewData.length === 0}
+                disabled={!importPreviewData || importPreviewData.length === 0 || isImporting}
                 className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20"
               >
                 Confirmar Importación ({importPreviewData?.length || 0})

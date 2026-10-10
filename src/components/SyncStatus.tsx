@@ -19,9 +19,10 @@ interface SyncStatusProps {
   onRetrySave: () => void;
   onToggleSync: () => void;
   onClearLog: () => void;
+  onMigrationApplied: (raw: Record<string, unknown>, mode: "migrated" | "restored") => void;
 }
 
-export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSync, onClearLog }: SyncStatusProps) {
+export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSync, onClearLog, onMigrationApplied }: SyncStatusProps) {
   const { syncEvents, syncEnabled } = state;
 
   // Estado real del último guardado (no un texto fijo).
@@ -120,7 +121,7 @@ export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSyn
 
       {/* MIGRATION PANEL - ADMIN */}
       {state.currentUser && (
-        <MigrationPanel state={state} currentUser={state.currentUser} />
+        <MigrationPanel state={state} currentUser={state.currentUser} onApplied={onMigrationApplied} />
       )}
 
       {/* SYNC EVENTS AUDIT LOG */}

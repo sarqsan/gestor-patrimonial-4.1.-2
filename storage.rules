@@ -1,12 +1,14 @@
 // Reglas de Firebase Storage para los adjuntos de la aplicación.
-// ESTADO: versionadas en el repositorio pero NO publicadas. Publicar manualmente
-// desde la consola de Firebase (Storage > Reglas) o con Firebase CLI tras revisarlas.
+// ESTADO: versionadas en el repositorio. DEBEN publicarse antes de usar la subida de adjuntos
+// o la migración (incluida la ruta de copias de seguridad). Publicar desde la consola de
+// Firebase (Storage > Reglas) o con Firebase CLI tras revisarlas.
 //
 // Diseño:
 // - Solo usuarios con sesión (incluida la sesión anónima actual) pueden leer y subir.
-// - Sin acceso público: no hay "allow read: if true".
-// - Límite de 10 MB y solo PDF o imágenes, igual que la validación del cliente.
-// - No se permite borrar: los adjuntos históricos y anteriores a un cambio se conservan.
+// - Sin acceso público: lectura siempre condicionada a sesión.
+// - Adjuntos: límite de 10 MB; PDF, imágenes y, solo para contratos generados, .doc de Word.
+// - No se permite borrar ni sobrescribir: los adjuntos y copias anteriores se conservan.
+// - Copias de seguridad de la cartera (users/{u}/backups/**): JSON, límite 50 MB, solo crear y leer.
 // - La identidad por usuario de la app NO está garantizada por la autenticación anónima;
 //   el aislamiento por carpeta users/{usuario} es una convención, no una frontera de seguridad.
 rules_version = '2';
@@ -18,8 +20,16 @@ service firebase.storage {
       allow create, update: if request.auth != null
         && request.resource.size <= 10 * 1024 * 1024
         && (request.resource.contentType == 'application/pdf'
+            || request.resource.contentType == 'application/msword'
             || request.resource.contentType.matches('image/.*'));
       allow delete: if false;
+    }
+    match /users/{userId}/backups/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.size <= 50 * 1024 * 1024
+        && request.resource.contentType == 'application/json';
+      allow update, delete: if false;
     }
     match /{allPaths=**} {
       allow read, write: if false;

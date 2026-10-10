@@ -9,7 +9,8 @@ import AuthScreen from "./components/AuthScreen";
 import Expenses from "./components/Expenses";
 import ContractCreator from "./components/ContractCreator";
 import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, SaveStatus, getThemeColors } from "./types";
-import { estimatePayloadBytes, PORTFOLIO_DOC_SAFE_BYTES } from "./lib/attachmentRules";
+import { checkPortfolioWrite, legacyDataUrlSet } from "./lib/portfolioGuard";
+import { mergeMigratedReferences } from "./lib/portfolioMigrationRun";
 import { portfolioBody } from "./lib/portfolioPayload";
 import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
 import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
@@ -49,9 +50,6 @@ function describePersistenceError(err: unknown): string {
   }
   return `No se ha podido guardar en la nube (${msg}). Pulsa Reintentar.`;
 }
-
-const PORTFOLIO_BLOCKED_MESSAGE = (kb: number) =>
-  `La cartera ocupa ${kb} KB y supera el límite por documento de Firestore (1 MiB). Los nuevos adjuntos ya se guardan en Storage, pero el documento histórico necesita migración antes de poder guardar más datos. Los cambios NO se han guardado en la nube.`;
 
 export default function App() {
   const [state, setState] = useState<AppState>({
@@ -98,6 +96,7 @@ export default function App() {
           const userStateStr = localStorage.getItem(`rentasync_state_${session.currentUser}`);
           if (userStateStr) {
             const parsed = JSON.parse(userStateStr);
+            for (const v of legacyDataUrlSet(parsed)) legacyBaselineRef.current.add(v);
             setState({
               currentYear: 2026,
               yearlyProfiles: {},
@@ -128,20 +127,24 @@ export default function App() {
   const localChangeRef = useRef(false);
   const dirtyRef = useRef(false); // hay cambios locales aún no confirmados por Firestore
   const lastSavedJsonRef = useRef<string | null>(null);
+  // Base64 históricos conocidos (ya en la nube o cargados de la copia local). Se toleran
+  // mientras existan; cualquier Base64 NUEVO se rechaza antes de escribir.
+  const legacyBaselineRef = useRef<Set<string>>(new Set());
   const writeSeqRef = useRef(0);
   const lastOkSeqRef = useRef(0);
 
 
   const persistPortfolio = (userId: string, s: AppState) => {
-    const body = portfolioBody(s);
+    // Se mide el JSON exacto que se escribirá (sin undefined, como en Firestore).
+    const body = JSON.parse(JSON.stringify(portfolioBody(s)));
     const json = JSON.stringify(body);
     const seq = ++writeSeqRef.current;
 
-    // Guardia de tamaño: no intentamos una escritura que Firestore va a rechazar.
-    const bytes = estimatePayloadBytes(body);
-    if (bytes > PORTFOLIO_DOC_SAFE_BYTES) {
+    // Guardia centralizada: rechaza Base64 nuevos y documentos sobre el margen seguro.
+    const check = checkPortfolioWrite(body, { allowedLegacyDataUrls: legacyBaselineRef.current });
+    if (!check.ok) {
       dirtyRef.current = true;
-      setSaveStatus({ kind: "error", message: PORTFOLIO_BLOCKED_MESSAGE(Math.round(bytes / 1024)), blocked: true, at: Date.now() });
+      setSaveStatus({ kind: "error", message: check.errors.join(" "), blocked: true, at: Date.now() });
       return;
     }
 
@@ -169,13 +172,15 @@ export default function App() {
       }
     }, 20000);
 
-    setDoc(userDocRef, { ...JSON.parse(json), updatedAt: new Date().toISOString() }, { merge: true })
+    setDoc(userDocRef, { ...body, updatedAt: new Date().toISOString() }, { merge: true })
       .then(() => {
         settled = true;
         clearTimeout(slowTimer);
         if (seq > lastOkSeqRef.current) {
           lastOkSeqRef.current = seq;
           lastSavedJsonRef.current = json;
+          // Los Base64 de esta escritura ya están en la nube: pasan a ser conocidos.
+          for (const v of legacyDataUrlSet(body)) legacyBaselineRef.current.add(v);
         }
         if (seq === writeSeqRef.current) {
           dirtyRef.current = false;
@@ -210,6 +215,38 @@ export default function App() {
     localChangeRef.current = false;
     persistPortfolio(state.currentUser, state);
   }, [state]);
+
+  // Tras migrar o restaurar, la pantalla adopta el resultado de la nube.
+  // - Migración: solo se aplican las referencias a Storage sobre el estado actual (no se pierden
+  //   ediciones hechas durante la migración) y se guarda una vez el estado combinado.
+  // - Restauración: la copia es el original, así que reemplaza el estado (sin escribir de nuevo).
+  const handlePortfolioApplied = (raw: Record<string, unknown>, mode: "migrated" | "restored") => {
+    const { updatedAt: _ignored, ...body } = raw as Record<string, unknown> & { updatedAt?: string };
+    dirtyRef.current = false;
+    lastSavedJsonRef.current = null;
+    if (mode === "migrated") {
+      legacyBaselineRef.current = new Set();
+      localChangeRef.current = true; // guarda una vez el estado combinado (limpio) en la nube
+      setState((prev) => mergeMigratedReferences(prev, body));
+      return;
+    }
+    legacyBaselineRef.current = legacyDataUrlSet(body);
+    localChangeRef.current = false;
+    setState((prev) => ({
+      ...prev,
+      properties: (body.properties as Property[]) ?? prev.properties,
+      payments: (body.payments as RentPayment[]) ?? prev.payments,
+      expenses: (body.expenses as PropertyExpense[]) ?? prev.expenses,
+      contracts: (body.contracts as any[]) ?? prev.contracts,
+      syncEvents: (body.syncEvents as SyncEvent[]) ?? prev.syncEvents,
+      yearlyProfiles: (body.yearlyProfiles as AppState["yearlyProfiles"]) ?? prev.yearlyProfiles,
+      currentYear: (body.currentYear as number) ?? prev.currentYear,
+      isOnboarded: (body.isOnboarded as boolean) ?? prev.isOnboarded,
+      user1: (body.user1 as AppState["user1"]) ?? prev.user1,
+      user2: (body.user2 as AppState["user2"]) ?? prev.user2,
+    }));
+    setSaveStatus({ kind: "saved", at: Date.now() });
+  };
 
   const retrySave = () => {
     if (!state.currentUser) return;
@@ -271,6 +308,7 @@ export default function App() {
       if (dirtyRef.current) return; // cambios locales pendientes: no sobrescribir con la nube
       if (snapshot.exists()) {
         const cloudData = snapshot.data();
+        for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
         setState((prev) => ({
           ...prev,
           properties: cloudData.properties || prev.properties,
@@ -295,6 +333,7 @@ export default function App() {
       if (dirtyRef.current) return;
       if (docSnap.exists()) {
         const cloudData = docSnap.data();
+        for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
         setState((prev) => ({
           ...prev,
           properties: cloudData.properties || prev.properties,
@@ -1153,6 +1192,7 @@ export default function App() {
             state={state} 
             onEditProperty={handleEditProperty} 
             addSyncEvent={addSyncEvent} 
+            currentUser={state.currentUser}
           />
         )}
 
@@ -1163,6 +1203,7 @@ export default function App() {
             onRetrySave={retrySave}
             onToggleSync={handleToggleSync} 
             onClearLog={handleClearLog} 
+            onMigrationApplied={handlePortfolioApplied}
           />
         )}
 

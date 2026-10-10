@@ -1,6 +1,8 @@
 import { readApiJson } from "../lib/apiResponse";
 import React, { useState, useEffect } from "react";
 import { AppState, Property } from "../types";
+import { newAttachmentId, WORD_DOCUMENT_MIME } from "../lib/attachmentRules";
+import { uploadAttachment } from "../lib/attachments";
 import { 
   FileText, 
   Download, 
@@ -23,9 +25,10 @@ interface ContractCreatorProps {
   state: AppState;
   onEditProperty: (updatedProperty: Property) => void;
   addSyncEvent: (source: string, target: string, action: string, details: string) => void;
+  currentUser?: string;
 }
 
-export default function ContractCreator({ state, onEditProperty, addSyncEvent }: ContractCreatorProps) {
+export default function ContractCreator({ state, onEditProperty, addSyncEvent, currentUser }: ContractCreatorProps) {
   // Property selection
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
   
@@ -236,7 +239,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
   ]);
 
   // Save/Link contract parameters directly to the Property module in state
-  const handleLinkToProperty = () => {
+  const handleLinkToProperty = async () => {
     if (!selectedPropertyId || selectedPropertyId === "manual") {
       alert("Selecciona un inmueble de tu cartera para vincular este contrato.");
       return;
@@ -244,6 +247,26 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
 
     const prop = state.properties.find(p => p.id === selectedPropertyId);
     if (!prop) return;
+    if (!currentUser) {
+      alert("No hay una sesión activa para guardar el contrato.");
+      return;
+    }
+
+    // El contrato generado se guarda como archivo real en Storage (no solo como nombre).
+    const pdfName = `Contrato_Generado_${prop.address.split(",")[0].replace(/\s+/g, "_")}.doc`;
+    let stored;
+    try {
+      stored = await uploadAttachment({
+        userId: currentUser,
+        folder: "contracts",
+        file: new File([buildContractDocBlob()], pdfName, { type: WORD_DOCUMENT_MIME }),
+        attachmentId: newAttachmentId("ctr"),
+        allowWordDocument: true,
+      });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo guardar el contrato en Storage. El inmueble no se ha modificado.");
+      return;
+    }
 
     const updatedProp: Property = {
       ...prop,
@@ -253,8 +276,9 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
       contract: {
         startDate: startDate,
         monthlyRent: monthlyRent,
-        pdfName: `Contrato_Generado_${prop.address.split(",")[0].replace(/\s+/g, "_")}.doc`,
-        pdfSize: "Legal Word Format (Auto)"
+        pdfName,
+        pdfSize: "Legal Word Format (Auto)",
+        pdfPath: stored.storagePath,
       }
     };
 
@@ -365,7 +389,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
   };
 
   // Elegant Word download (.doc opens perfectly in Word as HTML rich document)
-  const handleDownloadDoc = () => {
+  const buildContractDocBlob = (): Blob => {
     // Wrap contract text with standard HTML line breaks and basic styling for Microsoft Word compatibility
     const formattedHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
@@ -429,7 +453,11 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
       </html>
     `;
 
-    const blob = new Blob(["\ufeff" + formattedHtml], { type: "application/msword;charset=utf-8" });
+    return new Blob(["\ufeff" + formattedHtml], { type: "application/msword;charset=utf-8" });
+  };
+
+  const handleDownloadDoc = () => {
+    const blob = buildContractDocBlob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

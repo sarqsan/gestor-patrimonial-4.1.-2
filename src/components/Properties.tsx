@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense, TenantContractRecord, getEffectivePropertyFinancials } from "../types";
 import { validateAttachment, newAttachmentId } from "../lib/attachmentRules";
-import { uploadAttachment, downloadAttachment } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, downloadAttachment } from "../lib/attachments";
+import { externalizeImportedProperties } from "../lib/importAttachments";
 import {
   IMPORT_ACCEPT,
   validateImportFileName,
@@ -91,6 +92,7 @@ export default function Properties({
   const [importRejected, setImportRejected] = useState<ImportIssue[]>([]);
   const [importWarnings, setImportWarnings] = useState<ImportIssue[]>([]);
   const [importStructureNote, setImportStructureNote] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const [financialYear, setFinancialYear] = useState<number>(currentYear);
   const [docYear, setDocYear] = useState<number>(currentYear);
 
@@ -857,11 +859,26 @@ export default function Properties({
     }
   };
 
-  const handleConfirmImport = () => {
-    if (!importPreviewData || importPreviewData.length === 0) return;
+  const handleConfirmImport = async () => {
+    if (!importPreviewData || importPreviewData.length === 0 || isImporting) return;
+    // Los documentos Base64 de la importación se suben a Storage ANTES de tocar la cartera.
+    let prepared: Property[];
+    setIsImporting(true);
+    setImportError(null);
+    try {
+      if (!currentUser) throw new Error("No hay una sesión activa para importar los documentos.");
+      prepared = await externalizeImportedProperties(importPreviewData, (req) =>
+        uploadBytesVerified({ userId: currentUser, ...req })
+      );
+    } catch (err) {
+      setIsImporting(false);
+      setImportError(err instanceof Error ? err.message : "No se han podido guardar los documentos. La importación se ha cancelado.");
+      return;
+    }
+    setIsImporting(false);
     if (onImportProperties) {
-      onImportProperties(importPreviewData, importMode);
-      setImportSuccessMsg(`Se han importado con éxito ${importPreviewData.length} inmuebles.`);
+      onImportProperties(prepared, importMode);
+      setImportSuccessMsg(`Se han importado con éxito ${prepared.length} inmuebles.`);
       setTimeout(() => {
         setIsImportOpen(false);
         setImportPreviewData(null);
@@ -871,7 +888,7 @@ export default function Properties({
         setImportStructureNote(null);
       }, 1200);
     } else {
-      importPreviewData.forEach(p => onAddProperty(p));
+      prepared.forEach(p => onAddProperty(p));
       setIsImportOpen(false);
       setImportPreviewData(null);
       setImportRejected([]);
@@ -2324,7 +2341,12 @@ export default function Properties({
                                       href="#"
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        alert(`Descargando ${prop.contract?.pdfName}... (Simulado)`);
+                                        if (!prop.contract?.pdfPath) {
+                                          alert("Este contrato no tiene archivo guardado en Storage (registro anterior o generado sin archivo). Vuelve a adjuntar el PDF.");
+                                          return;
+                                        }
+                                        downloadAttachment({ storagePath: prop.contract.pdfPath, fileName: prop.contract.pdfName || "contrato.pdf" })
+                                          .catch((err) => alert(err instanceof Error ? err.message : "No se pudo descargar el contrato."));
                                       }}
                                       className="text-[10px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded font-bold transition-all cursor-pointer"
                                     >
@@ -2797,7 +2819,7 @@ export default function Properties({
               <button
                 type="button"
                 onClick={handleConfirmImport}
-                disabled={!importPreviewData || importPreviewData.length === 0}
+                disabled={!importPreviewData || importPreviewData.length === 0 || isImporting}
                 className="px-5 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-lg shadow-amber-500/20"
               >
                 Confirmar Importación ({importPreviewData?.length || 0})
