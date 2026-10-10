@@ -54,7 +54,7 @@ export interface PropertyDocument {
   category: 'ibi' | 'seguros' | 'comunidad' | 'reparaciones' | 'muebles_electrodomesticos' | 'otros';
   year: number;
   uploadDate: string;
-  fileData?: string; // LEGADO: data URL Base64 incrustada (solo lectura; no se escribe en nuevos registros)
+  fileData?: string; // LEGADO: data URL Base64 incrustada. Solo se escribe como contingencia local si Firebase está bloqueado por administración.
   storagePath?: string; // Ruta en Firebase Storage (nuevos adjuntos)
   contentType?: string;
 }
@@ -116,7 +116,7 @@ export interface PropertyExpense {
   amount: number;
   date: string; // YYYY-MM-DD
   description?: string;
-  receiptUrl?: string; // LEGADO: data URL Base64 incrustada (históricos)
+  receiptUrl?: string; // LEGADO: data URL Base64 incrustada (históricos). También contingencia local si Firebase está bloqueado por administración.
   receiptPath?: string; // Ruta en Firebase Storage (nuevos comprobantes)
   receiptName?: string;
   receiptType?: string;

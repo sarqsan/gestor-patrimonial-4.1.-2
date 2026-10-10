@@ -171,22 +171,29 @@ test("R5. La capa de adjuntos comunica la restricción administrativa sin confun
   }
 });
 
-test("R6. uploadAttachment se cancela por la restricción administrativa ANTES de intentar la subida a Storage", { timeout: 20_000 }, async () => {
+test("R6. Bajo restricción administrativa no se intenta ninguna subida a Storage", { timeout: 20_000 }, async () => {
   const { driver, calls } = adminRestrictedDriver();
   __setSignInDriverForTests(driver);
   try {
-    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "comprobante.png", { type: "image/png" });
+    // Contratos: sin vía local equivalente → la subida se cancela ANTES de tocar Storage.
+    const contractFile = new File([new Uint8Array(256)], "contrato.doc", { type: "application/msword" });
     await assert.rejects(
-      () => uploadAttachment({ userId: "rentasync", folder: "expenses", file }),
+      () => uploadAttachment({ userId: "rentasync", folder: "contracts", file: contractFile, allowWordDocument: true }),
       (err: any) => {
         assert.ok(err instanceof AttachmentError);
         assert.match(err.message, new RegExp(ADMIN_CODE.replace("/", "\\/")));
-        assert.match(err.message, /El archivo no se ha subido/i, "la subida queda cancelada");
         assert.doesNotMatch(err.message, /storage\//i, "no debe llegar a producirse un error de Storage: la subida no se intenta");
         return true;
       }
     );
-    assert.equal(calls.count, 1, "se consulta una sola vez al servicio de autenticación");
+
+    // Comprobantes: vía local de contingencia (modo local-inline), igualmente sin tocar Storage.
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "comprobante.png", { type: "image/png" });
+    const stored = await uploadAttachment({ userId: "rentasync", folder: "expenses", file });
+    assert.equal(stored.mode, "local-inline");
+    assert.equal(stored.storagePath, undefined, "no se genera ruta de Storage bajo bloqueo administrativo");
+
+    assert.equal(calls.count, 2, "una consulta al servicio de autenticación por intento");
   } finally {
     __setSignInDriverForTests(null);
   }

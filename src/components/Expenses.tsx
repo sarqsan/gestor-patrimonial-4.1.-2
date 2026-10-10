@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
-import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
 import { externalizeImportedExpenses } from "../lib/importAttachments";
 import { extractYearFromDate, normalizeDateToIso, isDateOlderThanYears } from "../lib/dateUtils";
 import {
@@ -207,12 +207,13 @@ export default function Expenses({
         file,
         attachmentId: newAttachmentId("rcpt"),
       });
-      onUpdateExpenseReceipt(expenseId, {
-        receiptPath: stored.storagePath,
-        receiptName: stored.name,
-        receiptType: stored.contentType,
-        receiptUrl: undefined,
-      });
+      onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
+      if (stored.mode === "local-inline") {
+        alert(
+          "Comprobante guardado en la copia local de este navegador (Firebase está bloqueado por administración). " +
+          "Se enviará a la nube cuando se restablezca el acceso."
+        );
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "No se pudo subir el comprobante.");
     }
@@ -571,11 +572,7 @@ export default function Expenses({
           file: pendingReceiptFile,
           attachmentId: newAttachmentId("rcpt"),
         });
-        receiptFields = {
-          receiptPath: stored.storagePath,
-          receiptName: stored.name,
-          receiptType: stored.contentType,
-        };
+        receiptFields = expenseReceiptFieldsFromStored(stored);
       } catch (err) {
         setIsSavingExpense(false);
         setReceiptError(err instanceof Error ? err.message : "No se pudo subir el comprobante. La operación no se ha guardado.");

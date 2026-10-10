@@ -13,8 +13,21 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "./attachmentRules";
 import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./verifiedObjectStore";
+import {
+  LOCAL_INLINE_MAX_RAW_BYTES,
+  blobToDataUrl,
+  localInlineBudgetProblem,
+  maybeDownscaleImage,
+} from "./localVault";
+import type { PropertyExpense } from "../types";
 
 export class AttachmentError extends Error {}
+
+/**
+ * Fallo de sesión por restricción ADMINISTRATIVA del proyecto Firebase
+ * (auth/admin-restricted-operation). No es un fallo de red: reintentar no lo resuelve.
+ */
+export class AdminRestrictedAttachmentError extends AttachmentError {}
 
 const AUTH_TIMEOUT_MS = 15_000;
 const UPLOAD_TIMEOUT_MS = 60_000;
@@ -52,9 +65,9 @@ async function ensureSignedIn(): Promise<void> {
       // NO es un fallo transitorio de red y ningún reintento de cliente puede resolverlo.
       // Se comunica como bloqueo de configuración del proyecto Firebase, sin confundirlo
       // con problemas de conexión ni agotar el tiempo de espera.
-      throw new AttachmentError(
+      throw new AdminRestrictedAttachmentError(
         `Firebase Auth ha rechazado la sesión por una restricción administrativa del proyecto Firebase ` +
-          `(${code}: ${detail}). El archivo no se ha subido. Este bloqueo no puede resolverse desde la ` +
+          `(${code}: ${detail}). Este bloqueo no puede resolverse desde la ` +
           `aplicación: requiere revisar la configuración de Authentication/Identity Platform del proyecto ` +
           `en la consola de Firebase.`
       );
@@ -67,10 +80,77 @@ async function ensureSignedIn(): Promise<void> {
 }
 
 export interface StoredAttachment {
-  storagePath: string;
+  /** Ruta en Firebase Storage (solo en modo "storage"). */
+  storagePath?: string;
+  /** Data URL en la copia local del usuario (solo en modo "local-inline"). */
+  inlineData?: string;
+  /**
+   * "storage": guardado en Firebase Storage (vía normal).
+   * "local-inline": contingencia local por bloqueo administrativo de Firebase; formato
+   * legado (data URL) que todas las pantallas leen y descargan, con vía de salida hacia
+   * Storage cuando se restablezca el acceso (externalizeImportedExpenses).
+   */
+  mode: "storage" | "local-inline";
   name: string;
   contentType: string;
   size: number;
+}
+
+/**
+ * Campos de comprobante de operación a partir del resultado de una subida.
+ * En modo local escribe el campo legado receiptUrl (soportado por visor, descarga,
+ * exportación ZIP/AEAT y reconciliación); en modo Storage escribe receiptPath.
+ */
+export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partial<PropertyExpense> {
+  if (stored.mode === "local-inline") {
+    return {
+      receiptUrl: stored.inlineData,
+      receiptName: stored.name,
+      receiptType: stored.contentType,
+      receiptPath: undefined,
+    };
+  }
+  return {
+    receiptPath: stored.storagePath,
+    receiptName: stored.name,
+    receiptType: stored.contentType,
+    receiptUrl: undefined,
+  };
+}
+
+/**
+ * Vía de contingencia SOLO ante bloqueo administrativo (auth/admin-restricted-operation):
+ * guarda el adjunto como data URL (formato legado) para la copia local del usuario.
+ * No escribe en Firebase, no cambia reglas ni rutas de Storage, no reasigna nada.
+ */
+async function storeLocalInlineFallback(file: File): Promise<StoredAttachment> {
+  let candidate: Blob = file;
+  let contentType = resolveContentType(file.name, file.type);
+
+  // Imágenes por encima del presupuesto: intentar reducción en el navegador.
+  if (file.size > LOCAL_INLINE_MAX_RAW_BYTES && contentType.startsWith("image/")) {
+    const downscaled = await maybeDownscaleImage(file, LOCAL_INLINE_MAX_RAW_BYTES);
+    if (downscaled) {
+      candidate = downscaled;
+      contentType = downscaled.type || "image/jpeg";
+    }
+  }
+
+  const problem = localInlineBudgetProblem({ size: candidate.size });
+  if (problem) {
+    throw new AdminRestrictedAttachmentError(
+      `Firebase Auth está bloqueado por administración y el archivo no cabe en la vía local: ${problem}`
+    );
+  }
+
+  const inlineData = await blobToDataUrl(candidate, contentType);
+  return {
+    mode: "local-inline",
+    inlineData,
+    name: file.name,
+    contentType,
+    size: candidate.size,
+  };
 }
 
 /** Traduce códigos de Firebase Storage a mensajes que el usuario puede entender. */
@@ -109,7 +189,18 @@ export async function uploadAttachment(opts: {
   const invalid = validateAttachment(opts.file, { allowWordDocument: opts.allowWordDocument });
   if (invalid) throw new AttachmentError(invalid);
 
-  await ensureSignedIn();
+  try {
+    await ensureSignedIn();
+  } catch (err) {
+    // Contingencia SOLO ante rechazo administrativo del proyecto Firebase: comprobantes
+    // de gastos y documentos de inmueble se guardan en formato legado (data URL) en la
+    // copia local del usuario. Los contratos no tienen campo legado equivalente y las
+    // subidas verificadas (importaciones/migración) mantienen su comportamiento estricto.
+    if (err instanceof AdminRestrictedAttachmentError && opts.folder !== "contracts") {
+      return storeLocalInlineFallback(opts.file);
+    }
+    throw err;
+  }
 
   const contentType = resolveContentType(opts.file.name, opts.file.type);
   const attachmentId = opts.attachmentId ?? newAttachmentId("att");
@@ -127,12 +218,18 @@ export async function uploadAttachment(opts: {
     throw new AttachmentError(describeStorageError(err));
   }
 
-  return { storagePath, name: opts.file.name, contentType, size: opts.file.size };
+  return { mode: "storage", storagePath, name: opts.file.name, contentType, size: opts.file.size };
 }
 
 /** Espera a la sesión de Firebase (necesaria antes de cualquier operación de Storage). */
 export async function ensureFirebaseSession(): Promise<void> {
   await ensureSignedIn();
+}
+
+/** Resultado de una subida confirmada a Firebase Storage (importaciones, subidas verificadas). */
+export interface StorageStoredAttachment extends StoredAttachment {
+  mode: "storage";
+  storagePath: string;
 }
 
 /**
@@ -146,7 +243,7 @@ export async function uploadBytesVerified(opts: {
   fileName: string;
   contentType: string;
   bytes: Uint8Array;
-}): Promise<StoredAttachment> {
+}): Promise<StorageStoredAttachment> {
   await ensureSignedIn();
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, opts.attachmentId, opts.fileName);
   // Sin `update` en las reglas: si el objeto ya existe con el mismo contenido (reimportación),
@@ -182,7 +279,7 @@ export async function uploadBytesVerified(opts: {
     if (err instanceof ObjectConflictError) throw new AttachmentError(err.message);
     throw new AttachmentError(describeStorageError(err));
   }
-  return { storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
+  return { mode: "storage", storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
 }
 
 /** URL temporal para previsualizar (img/iframe). No se persiste en Firestore. */

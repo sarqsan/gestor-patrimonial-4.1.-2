@@ -204,9 +204,81 @@ En el proyecto `startup-sanctuary-sln7n`:
   seguridad que la incidencia manda conservar.
 - **Emuladores de Firebase**: no consultan ni modifican el proyecto real; no resuelven nada.
 
-Conclusión: la única vía es la acción administrativa A.4, ejecutable únicamente por la
-administración del proyecto. Hasta que conste como aplicada, la incidencia permanece bloqueada y no
-se introducirán más cambios de cliente.
+Conclusión: para restaurar la sincronización en la nube, la única vía es la acción administrativa
+A.4, ejecutable únicamente por la administración del proyecto. Mientras tanto, la subida de
+comprobantes se restablece mediante la alternativa del apartado B.
+
+## Apéndice B — Solución alternativa implementada: contingencia local-first (tercera investigación, 2026-10-10)
+
+Orden recibida: resolver la subida de archivos sin intervención manual del usuario en Firebase
+Console. Agotadas todas las vías administrativas (Apéndice A: sin conectores, sin CLIs, sin
+credenciales, sin red a Google), la única alternativa ejecutable desde el repositorio es una vía de
+contingencia que no dependa de la sesión de Firebase.
+
+### B.1. Alternativas evaluadas y descartadas (con motivo)
+
+| Alternativa | Motivo del descarte |
+| --- | --- |
+| Otro proveedor Firebase (Google OAuth, email/contraseña) | Exigen configuración del proyecto que no se puede consultar ni modificar desde aquí; además cambian el UID efectivo: `isOwner` no casaría tokens Google con `users/{usuario}` sin reasignar movimientos (prohibido) |
+| Tokens personalizados (Admin SDK) | Requieren credenciales privilegiadas inexistentes y su uso en cliente está prohibido |
+| Otro proyecto Firebase / otra BaaS | Prohibido cambiar el proyecto o el identificador de la base de datos; crear cuentas externas requeriría acción manual del usuario |
+| Almacenamiento en el servidor propio (Render/Vercel) | Sin base de datos ni disco persistente configurados; crearlos exige acción manual del usuario y credenciales nuevas |
+| GitHub como almacén en runtime | Exigiría incrustar un token con permisos de escritura en la app: clave privilegiada en cliente (prohibido) |
+
+### B.2. La vía implementada
+
+La aplicación nació con los adjuntos incrustados como data URL (formato legado que el visor, la
+descarga, la exportación ZIP/AEAT y la reconciliación siguen soportando al 100 %). La solución
+reutiliza ese formato como contingencia:
+
+- `src/lib/localVault.ts` (nuevo): presupuesto local (~1 MB crudo por archivo, ajustado a
+  localStorage), conversión a data URL, reducción de imágenes grandes en el navegador.
+- `src/lib/attachments.ts`: si y solo si la sesión falla con la clase ADMINISTRATIVA
+  (`auth/admin-restricted-operation`), `uploadAttachment` guarda el archivo en modo
+  `local-inline` para comprobantes de gastos y documentos de inmueble. Los fallos de red siguen
+  comportándose como antes (reintentables, sin bifurcar datos). Los contratos (sin campo legado
+  equivalente) y las subidas verificadas de importación mantienen su comportamiento estricto.
+- `src/components/{Expenses,Dashboard,Properties}.tsx`: escriben `receiptUrl` / `fileData`
+  (campos legados) en modo local y `receiptPath` / `storagePath` en modo Storage; avisan al
+  usuario de que el archivo queda en su copia local hasta el restablecimiento del acceso.
+- Sin sesión (y por tanto sin escrituras) de Firebase en la vía de contingencia: no se genera
+  ninguna ruta de Storage ni se intenta ninguna operación contra el proyecto bloqueado.
+
+### B.3. Impacto analizado sobre UIDs, reglas y archivos históricos
+
+- **UIDs**: ninguno nuevo; el modelo de propietarios (`ownerUid`, `users/{usuario}`) no se toca.
+- **Reglas**: `firestore.rules` y `storage.rules` sin cambios (siguen sin acceso público).
+- **Archivos históricos**: intactos en el proyecto Firebase y en las copias locales; nada se
+  borra, migra ni reasigna. La vía local solo afecta a adjuntos NUEVOS subidos durante el bloqueo.
+- **Aislamiento entre usuarios**: el contenido local vive en la copia de cada usuario
+  (`rentasync_state_{usuario}` en localStorage), con el mismo aislamiento que el resto de su
+  cartera local; ningún dato cruza entre usuarios.
+- **Vía de salida**: cuando se restablezca el acceso, `externalizeImportedExpenses`/importaciones
+  convierten los `receiptUrl` Base64 en referencias `receiptPath` de Storage (mecanismo ya
+  existente y probado); `movementService` conserva `receiptUrl` mientras no haya `receiptPath`.
+
+### B.4. Limitaciones honestas de la vía local
+
+- Los comprobantes quedan en el navegador del usuario (localStorage, ~5 MB por origen); no hay
+  copia en la nube hasta que se restablezca el acceso. Se comunica al usuario en cada guardado.
+- Archivos no comprimibles por encima del presupuesto local (p. ej. PDF > ~1 MB) se rechazan con
+  mensaje claro mientras dure el bloqueo.
+- Contratos generados e importaciones masivas requieren Firebase: siguen cancelándose con el
+  mensaje de restricción administrativa (sin falso éxito).
+- La sincronización en la nube de movimientos permanece degradada (como antes de este cambio):
+  la causa raíz (§4/A.4) sigue pendiente de la administración del proyecto.
+
+### B.5. Verificación ejecutada
+
+- Suite automatizada: **217 pruebas, 0 fallos** (incluye `localFallback.test.ts`: reproducción
+  del bloqueo, modo local, recuperación byte a byte, no-confusión con fallos de red, contratos
+  estrictos, presupuestos) + `tsc --noEmit` + `vite build` correctos.
+- Extremo a extremo en entorno controlado (sin navegador): bloqueo administrativo real →
+  subida del comprobante → registro del movimiento con `receiptUrl` → recuperación íntegra
+  (5008/5008 bytes) → sin rutas de Storage generadas. Resultado: 5/5 PASS.
+- **No verificado (imposible hasta el desbloqueo)**: la subida contra Firebase Storage real y la
+  persistencia en Firestore real. La causa raíz administrativa permanece; esta entrega restaura la
+  función de adjuntar comprobantes sin depender de ella, no la sustituye ni la declara resuelta.
 
 ## 7. Datos y seguridad: garantías mantenidas
 

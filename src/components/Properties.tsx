@@ -228,9 +228,18 @@ export default function Properties({
       category: docCategory,
       year: docYear,
       uploadDate: new Date().toLocaleDateString('es-ES'),
-      storagePath: stored.storagePath,
+      // Modo Storage: referencia a Firebase Storage. Modo local-inline (bloqueo
+      // administrativo de Firebase): data URL en el campo legado fileData, que la
+      // descarga y el visor ya soportan. Nunca se escriben los dos a la vez.
+      storagePath: stored.mode === "storage" ? stored.storagePath : undefined,
+      fileData: stored.mode === "local-inline" ? stored.inlineData : undefined,
       contentType: stored.contentType,
     };
+    if (stored.mode === "local-inline") {
+      alert(
+        "Documento guardado en la copia local de este navegador (Firebase está bloqueado por administración). Se enviará a la nube cuando se restablezca el acceso."
+      );
+    }
 
     const updatedProp: Property = {
       ...prop,

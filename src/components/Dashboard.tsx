@@ -1,5 +1,5 @@
 import { readApiJson } from "../lib/apiResponse";
-import { uploadAttachment } from "../lib/attachments";
+import { uploadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
 import { newAttachmentId } from "../lib/attachmentRules";
 import React, { useState } from "react";
 import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
@@ -267,7 +267,12 @@ export default function Dashboard({
           file: scannedFile,
           attachmentId: newAttachmentId("rcpt"),
         });
-        receiptFields = { receiptPath: stored.storagePath, receiptName: stored.name, receiptType: stored.contentType };
+        receiptFields = expenseReceiptFieldsFromStored(stored);
+        if (stored.mode === "local-inline") {
+          alert(
+            "Factura guardada en la copia local de este navegador (Firebase está bloqueado por administración). Se enviará a la nube cuando se restablezca el acceso."
+          );
+        }
       } catch (err) {
         setScanError(err instanceof Error ? err.message : "No se pudo guardar la factura. El gasto no se ha registrado.");
         setSavingScan(false);
