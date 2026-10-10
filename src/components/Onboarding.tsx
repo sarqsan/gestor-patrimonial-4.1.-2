@@ -1,3 +1,4 @@
+import { readApiJson } from "../lib/apiResponse";
 import React, { useState } from "react";
 import { SAMPLE_DECLARATIONS } from "../data/samples";
 import { AppState } from "../types";
@@ -256,12 +257,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
 
       clearInterval(interval);
 
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "No se pudo extraer la información de los documentos.");
-      }
-
-      const result = await response.json();
+      const result = await readApiJson(response, "No se pudo extraer la información de los documentos.");
       if (result.properties) {
         result.properties = deduplicateProperties(result.properties);
       }

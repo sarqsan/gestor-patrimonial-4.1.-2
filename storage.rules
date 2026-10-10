@@ -1,0 +1,28 @@
+// Reglas de Firebase Storage para los adjuntos de la aplicación.
+// ESTADO: versionadas en el repositorio pero NO publicadas. Publicar manualmente
+// desde la consola de Firebase (Storage > Reglas) o con Firebase CLI tras revisarlas.
+//
+// Diseño:
+// - Solo usuarios con sesión (incluida la sesión anónima actual) pueden leer y subir.
+// - Sin acceso público: no hay "allow read: if true".
+// - Límite de 10 MB y solo PDF o imágenes, igual que la validación del cliente.
+// - No se permite borrar: los adjuntos históricos y anteriores a un cambio se conservan.
+// - La identidad por usuario de la app NO está garantizada por la autenticación anónima;
+//   el aislamiento por carpeta users/{usuario} es una convención, no una frontera de seguridad.
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{userId}/attachments/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null
+        && request.resource.size <= 10 * 1024 * 1024
+        && (request.resource.contentType == 'application/pdf'
+            || request.resource.contentType.matches('image/.*'));
+      allow delete: if false;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import React from "react";
-import { AppState, SyncEvent } from "../types";
+import { AppState, SaveStatus, SyncEvent } from "../types";
 import { 
   RefreshCw, 
   Activity, 
@@ -7,17 +7,31 @@ import {
   CheckCircle, 
   Clock,
   Settings,
-  XCircle
+  XCircle,
+  Loader2,
+  AlertTriangle
 } from "lucide-react";
 
 interface SyncStatusProps {
   state: AppState;
+  saveStatus: SaveStatus;
+  onRetrySave: () => void;
   onToggleSync: () => void;
   onClearLog: () => void;
 }
 
-export default function SyncStatus({ state, onToggleSync, onClearLog }: SyncStatusProps) {
+export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSync, onClearLog }: SyncStatusProps) {
   const { syncEvents, syncEnabled } = state;
+
+  // Estado real del último guardado (no un texto fijo).
+  const statusBadge =
+    saveStatus.kind === "saved"
+      ? { text: "Guardado en la nube", cls: "bg-amber-500/20 text-amber-300 border-amber-500/30" }
+      : saveStatus.kind === "saving"
+      ? { text: "Guardando…", cls: "bg-indigo-500/20 text-indigo-300 border-indigo-500/30" }
+      : saveStatus.kind === "error"
+      ? { text: "Error al guardar", cls: "bg-red-500/20 text-red-300 border-red-500/40" }
+      : { text: "Sin cambios pendientes", cls: "bg-slate-500/20 text-slate-300 border-slate-500/30" };
 
   return (
     <div id="sync-status-root" className="space-y-8 animate-fade-in text-slate-100">
@@ -77,13 +91,23 @@ export default function SyncStatus({ state, onToggleSync, onClearLog }: SyncStat
           <div>
             <div className="flex items-center space-x-2">
               <h3 className="font-bold text-white text-md">Persistencia en Nube Firebase Firestore</h3>
-              <span className="bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase">
-                En línea & Sincronizado
+              <span className={`border text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase inline-flex items-center gap-1 ${statusBadge.cls}`}>
+                {saveStatus.kind === "saving" && <Loader2 className="w-3 h-3 animate-spin" />}
+                {saveStatus.kind === "error" && <AlertTriangle className="w-3 h-3" />}
+                {statusBadge.text}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1 leading-normal">
-              Tus inmuebles, gastos, cobros, contratos y perfiles fiscales se almacenan y sincronizan automáticamente en tu base de datos cloud de Firebase Firestore.
+              Los datos de la cartera se guardan en Firebase Firestore y los comprobantes y documentos en Firebase Storage.
             </p>
+            {saveStatus.kind === "error" && (
+              <p className="text-xs text-red-300 mt-2 leading-normal">
+                {saveStatus.message}{" "}
+                {!saveStatus.blocked && (
+                  <button type="button" onClick={onRetrySave} className="underline font-semibold cursor-pointer">Reintentar</button>
+                )}
+              </p>
+            )}
           </div>
         </div>
 

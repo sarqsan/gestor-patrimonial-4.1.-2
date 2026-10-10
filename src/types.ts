@@ -21,6 +21,7 @@ export interface PropertyContract {
   monthlyRent: number;
   pdfName?: string;
   pdfSize?: string;
+  pdfPath?: string; // Ruta en Firebase Storage del PDF real del contrato
 }
 
 export interface TenantContractRecord {
@@ -32,6 +33,7 @@ export interface TenantContractRecord {
   monthlyRent: number;
   pdfName?: string;
   pdfSize?: string;
+  pdfPath?: string; // Ruta en Firebase Storage del PDF real
   notes?: string;
 }
 
@@ -52,7 +54,9 @@ export interface PropertyDocument {
   category: 'ibi' | 'seguros' | 'comunidad' | 'reparaciones' | 'muebles_electrodomesticos' | 'otros';
   year: number;
   uploadDate: string;
-  fileData?: string; // Base64 data URL
+  fileData?: string; // LEGADO: data URL Base64 incrustada (solo lectura; no se escribe en nuevos registros)
+  storagePath?: string; // Ruta en Firebase Storage (nuevos adjuntos)
+  contentType?: string;
 }
 
 export interface Property {
@@ -112,7 +116,8 @@ export interface PropertyExpense {
   amount: number;
   date: string; // YYYY-MM-DD
   description?: string;
-  receiptUrl?: string;
+  receiptUrl?: string; // LEGADO: data URL Base64 incrustada (históricos)
+  receiptPath?: string; // Ruta en Firebase Storage (nuevos comprobantes)
   receiptName?: string;
   receiptType?: string;
 }
@@ -490,4 +495,13 @@ export function getEffectivePropertyFinancials(
     isManual: foundManualRef,
     isMortgageCalculated: false,
   };
+}
+
+/** Estado visible de la última operación de guardado en la nube. */
+export interface SaveStatus {
+  kind: "idle" | "saving" | "saved" | "error";
+  message?: string;
+  /** true cuando la escritura ni siquiera se intenta (p. ej. documento sobre el límite). */
+  blocked?: boolean;
+  at?: number;
 }

@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
+import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
+import { uploadAttachment, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
 import * as XLSX from "xlsx";
 import JSZip from "jszip";
 import { 
@@ -47,8 +49,18 @@ interface ExpensesProps {
   onAddExpense: (newExpense: PropertyExpense) => void;
   onDeleteExpense: (id: string) => void;
   onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
+  onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void;
+  currentUser?: string;
   user1Name: string;
   currentYear?: number;
+}
+
+function isImageAttachment(exp: { receiptType?: string; receiptName?: string; receiptPath?: string }, src: string): boolean {
+  return (exp.receiptType || "").startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptName || "") || src.startsWith("data:image/") || (!!exp.receiptPath && /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptPath));
+}
+
+function isPdfAttachment(exp: { receiptType?: string; receiptName?: string; receiptPath?: string }, src: string): boolean {
+  return (exp.receiptType || "") === "application/pdf" || /\.pdf$/i.test(exp.receiptName || "") || src.startsWith("data:application/pdf");
 }
 
 export default function Expenses({
@@ -57,6 +69,8 @@ export default function Expenses({
   onAddExpense,
   onDeleteExpense,
   onImportExpenses,
+  onUpdateExpenseReceipt,
+  currentUser,
   user1Name,
   currentYear = 2026
 }: ExpensesProps) {
@@ -96,70 +110,106 @@ export default function Expenses({
   // Receipt Viewer Modal state
   const [selectedReceiptExpense, setSelectedReceiptExpense] = useState<PropertyExpense | null>(null);
 
-  // File Upload Handler for Form
+  // Adjuntos: el archivo se elige aquí, se previsualiza localmente y se sube a Storage al guardar.
+  const [pendingReceiptFile, setPendingReceiptFile] = useState<File | null>(null);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [isSavingExpense, setIsSavingExpense] = useState(false);
+
+  // Visor: resuelve la URL de vista previa (Storage) o usa la existente (histórico / previsualización)
+  const [viewerSrc, setViewerSrc] = useState<string | null>(null);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setViewerSrc(null);
+    setViewerError(null);
+    const exp = selectedReceiptExpense;
+    if (!exp) return;
+    if (exp.receiptPath) {
+      setViewerLoading(true);
+      getAttachmentPreviewUrl(exp.receiptPath)
+        .then((url) => { if (!cancelled) setViewerSrc(url); })
+        .catch((err) => { if (!cancelled) setViewerError(err instanceof Error ? err.message : "No se pudo cargar el comprobante."); })
+        .finally(() => { if (!cancelled) setViewerLoading(false); });
+    } else if (exp.receiptUrl) {
+      setViewerSrc(exp.receiptUrl);
+    }
+    return () => { cancelled = true; };
+  }, [selectedReceiptExpense]);
+
+  // File Upload Handler for Form (solo selección y previsualización; la subida ocurre al guardar)
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      setError("El archivo seleccionado supera el límite de 10MB.");
+    const invalid = validateAttachment(file);
+    if (invalid) {
+      setError(invalid);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const result = event.target?.result as string;
-      setReceiptUrl(result);
-      setReceiptName(file.name);
-      setReceiptType(file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg"));
-      setError(null);
-    };
-    reader.onerror = () => {
-      setError("Error al leer el archivo seleccionado.");
-    };
-    reader.readAsDataURL(file);
+    if (receiptUrl?.startsWith("blob:")) URL.revokeObjectURL(receiptUrl);
+    setPendingReceiptFile(file);
+    setReceiptUrl(URL.createObjectURL(file));
+    setReceiptName(file.name);
+    setReceiptType(resolveContentType(file.name, file.type));
+    setReceiptError(null);
+    setError(null);
   };
 
   const handleRemoveReceipt = () => {
+    if (receiptUrl?.startsWith("blob:")) URL.revokeObjectURL(receiptUrl);
+    setPendingReceiptFile(null);
     setReceiptUrl(undefined);
     setReceiptName(undefined);
     setReceiptType(undefined);
   };
 
-  // Direct File Attach Handler from Table
-  const handleDirectAttachReceipt = (expenseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+  // Attach from the table: sube a Storage y actualiza solo ese gasto (sin reemplazar la lista completa)
+  const handleDirectAttachReceipt = async (expenseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      alert("El archivo seleccionado supera el límite de 10MB.");
+    const invalid = validateAttachment(file);
+    if (invalid) {
+      alert(invalid);
       return;
     }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const result = event.target?.result as string;
-      const fType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
-      const updatedExpenses = expenses.map(item => {
-        if (item.id === expenseId) {
-          return {
-            ...item,
-            receiptUrl: result,
-            receiptName: file.name,
-            receiptType: fType
-          };
-        }
-        return item;
+    if (!currentUser || !onUpdateExpenseReceipt) {
+      alert("No se puede adjuntar el comprobante: no hay una sesión activa.");
+      return;
+    }
+    try {
+      // Identificador nuevo en cada subida: nunca se sobrescribe el comprobante anterior.
+      const stored = await uploadAttachment({
+        userId: currentUser,
+        folder: "expenses",
+        file,
+        attachmentId: newAttachmentId("rcpt"),
       });
+      onUpdateExpenseReceipt(expenseId, {
+        receiptPath: stored.storagePath,
+        receiptName: stored.name,
+        receiptType: stored.contentType,
+        receiptUrl: undefined,
+      });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo subir el comprobante.");
+    }
+  };
 
-      if (onImportExpenses) {
-        onImportExpenses(updatedExpenses, 'replace');
-      } else {
-        const target = updatedExpenses.find(x => x.id === expenseId);
-        if (target) onAddExpense(target);
-      }
-    };
-    reader.readAsDataURL(file);
+  const handleDownloadReceipt = async (exp: PropertyExpense) => {
+    try {
+      await downloadAttachment({
+        storagePath: exp.receiptPath,
+        inlineData: exp.receiptUrl,
+        fileName: exp.receiptName || `comprobante_${exp.id}`,
+      });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo descargar el comprobante.");
+    }
   };
 
   // Filtered expenses helper for Export
@@ -201,8 +251,8 @@ export default function Expenses({
       "Importe (€)": e.amount,
       "Fecha": e.date,
       "Descripción / Concepto": e.description || "",
-      "Tiene Comprobante": e.receiptUrl ? "Sí" : "No",
-      "Nombre Archivo Adjunto": e.receiptName || (e.receiptUrl ? `Comprobante_${e.id}` : "-")
+      "Tiene Comprobante": hasReceipt(e) ? "Sí" : "No",
+      "Nombre Archivo Adjunto": e.receiptName || (hasReceipt(e) ? `Comprobante_${e.id}` : "-")
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -235,8 +285,8 @@ export default function Expenses({
         "Importe (€)": e.amount,
         "Fecha": e.date,
         "Descripción / Concepto": e.description || "",
-        "Tiene Comprobante": e.receiptUrl ? "Sí" : "No",
-        "Nombre Comprobante": e.receiptName || (e.receiptUrl ? `Comprobante_${e.id}` : "-")
+        "Tiene Comprobante": hasReceipt(e) ? "Sí" : "No",
+        "Nombre Comprobante": e.receiptName || (hasReceipt(e) ? `Comprobante_${e.id}` : "-")
       }));
 
       const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -254,35 +304,40 @@ export default function Expenses({
       // 2. Add folder with all attached receipts/invoices
       const receiptsFolder = zip.folder("Comprobantes_y_Facturas");
 
-      filtered.forEach((exp, idx) => {
-        if (exp.receiptUrl) {
-          let extension = "png";
-          if (exp.receiptType) {
-            if (exp.receiptType.includes("pdf")) extension = "pdf";
-            else if (exp.receiptType.includes("jpeg") || exp.receiptType.includes("jpg")) extension = "jpg";
-            else if (exp.receiptType.includes("webp")) extension = "webp";
-            else if (exp.receiptType.includes("png")) extension = "png";
-          } else if (exp.receiptUrl.startsWith("data:application/pdf")) {
-            extension = "pdf";
-          }
+      let failedReceipts = 0;
+      for (let idx = 0; idx < filtered.length; idx++) {
+        const exp = filtered[idx];
+        if (!hasReceipt(exp)) continue;
+        let extension = "pdf";
+        const type = exp.receiptType || "";
+        if (type.includes("jpeg") || type.includes("jpg")) extension = "jpg";
+        else if (type.includes("webp")) extension = "webp";
+        else if (type.includes("png")) extension = "png";
+        else if (type.includes("pdf")) extension = "pdf";
+        else if (exp.receiptUrl?.startsWith("data:image/png")) extension = "png";
+        else if (exp.receiptUrl?.startsWith("data:image/")) extension = "jpg";
 
-          const cleanProp = (propMap.get(exp.propertyId) || "Inmueble")
-            .split(",")[0]
-            .replace(/[^a-zA-Z0-9]/g, "_");
-          const cleanCat = (categories[exp.category]?.label || exp.category).replace(/[^a-zA-Z0-9]/g, "_");
-          
-          let fileName = exp.receiptName;
-          if (!fileName) {
-            fileName = `factura_${exp.date}_${cleanProp}_${cleanCat}_${exp.amount}EUR_${idx + 1}.${extension}`;
-          }
+        const cleanProp = (propMap.get(exp.propertyId) || "Inmueble")
+          .split(",")[0]
+          .replace(/[^a-zA-Z0-9]/g, "_");
+        const cleanCat = (categories[exp.category]?.label || exp.category).replace(/[^a-zA-Z0-9]/g, "_");
 
-          // Convert Data URL (Base64) into ZIP file
-          if (exp.receiptUrl.includes(",")) {
-            const base64Data = exp.receiptUrl.split(",")[1];
-            receiptsFolder?.file(fileName, base64Data, { base64: true });
-          }
+        let fileName = exp.receiptName;
+        if (!fileName) {
+          fileName = `factura_${exp.date}_${cleanProp}_${cleanCat}_${exp.amount}EUR_${idx + 1}.${extension}`;
         }
-      });
+
+        try {
+          const blob = await getAttachmentBlob({ storagePath: exp.receiptPath, inlineData: exp.receiptUrl });
+          receiptsFolder?.file(fileName, await blob.arrayBuffer());
+        } catch (err) {
+          console.error("No se pudo añadir el comprobante al ZIP:", exp.id, err);
+          failedReceipts++;
+        }
+      }
+      if (failedReceipts > 0) {
+        alert(`Atención: ${failedReceipts} comprobante(s) no se han podido incluir en el paquete. Revisa la conexión y vuelve a exportar.`);
+      }
 
       // 3. Generate ZIP blob and initiate browser download
       const zipContent = await zip.generateAsync({ type: "blob" });
@@ -450,9 +505,12 @@ export default function Expenses({
     setAmount("");
     setDate(new Date().toISOString().split("T")[0]);
     setDescription("");
+    if (receiptUrl?.startsWith("blob:")) URL.revokeObjectURL(receiptUrl);
+    setPendingReceiptFile(null);
     setReceiptUrl(undefined);
     setReceiptName(undefined);
     setReceiptType(undefined);
+    setReceiptError(null);
     setError(null);
   };
 
@@ -464,8 +522,9 @@ export default function Expenses({
     setIsAdding(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingExpense) return;
     if (!propertyId) {
       setError("Por favor, selecciona una propiedad.");
       return;
@@ -481,18 +540,46 @@ export default function Expenses({
     }
 
     const finalCategory = opType === "ingreso" ? "rent" : category;
+    const expenseId = `exp_${Date.now()}`;
+
+    // Si hay comprobante, primero se sube a Storage. Si falla, el formulario se mantiene con los datos.
+    let receiptFields: Partial<PropertyExpense> = {};
+    if (pendingReceiptFile) {
+      if (!currentUser) {
+        setReceiptError("No hay una sesión activa para guardar el comprobante.");
+        return;
+      }
+      setIsSavingExpense(true);
+      setReceiptError(null);
+      try {
+        const stored = await uploadAttachment({
+          userId: currentUser,
+          folder: "expenses",
+          file: pendingReceiptFile,
+          attachmentId: newAttachmentId("rcpt"),
+        });
+        receiptFields = {
+          receiptPath: stored.storagePath,
+          receiptName: stored.name,
+          receiptType: stored.contentType,
+        };
+      } catch (err) {
+        setIsSavingExpense(false);
+        setReceiptError(err instanceof Error ? err.message : "No se pudo subir el comprobante. La operación no se ha guardado.");
+        return;
+      }
+      setIsSavingExpense(false);
+    }
 
     const newExpense: PropertyExpense = {
-      id: `exp_${Date.now()}`,
+      id: expenseId,
       propertyId,
       category: finalCategory,
       type: opType,
       amount: parsedAmount,
       date,
       description: description.trim() || undefined,
-      receiptUrl,
-      receiptName,
-      receiptType
+      ...receiptFields,
     };
 
     onAddExpense(newExpense);
@@ -962,6 +1049,12 @@ export default function Expenses({
 
           </div>
 
+          {receiptError && (
+            <div className="mt-6 p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start space-x-2 text-xs text-red-400">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{receiptError}</span>
+            </div>
+          )}
           <div className="mt-8 flex justify-end space-x-3 border-t border-slate-800 pt-5">
             <button
               type="button"
@@ -972,9 +1065,10 @@ export default function Expenses({
             </button>
             <button
               type="submit"
-              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-xs transition-all cursor-pointer shadow-lg shadow-indigo-600/15"
+              disabled={isSavingExpense}
+              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-wait text-white font-semibold rounded-xl text-xs transition-all cursor-pointer shadow-lg shadow-indigo-600/15"
             >
-              Guardar Operación
+              {isSavingExpense ? "Subiendo comprobante…" : "Guardar Operación"}
             </button>
           </div>
         </form>
@@ -1115,7 +1209,7 @@ export default function Expenses({
                             {exp.description || "-"}
                           </td>
                           <td className="py-3.5 px-3 text-center">
-                            {exp.receiptUrl ? (
+                            {hasReceipt(exp) ? (
                               <button
                                 type="button"
                                 onClick={() => setSelectedReceiptExpense(exp)}
@@ -1432,7 +1526,7 @@ export default function Expenses({
                     </span>
                     <span className="bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 px-2.5 py-0.5 rounded-md font-mono font-bold text-[11px] flex items-center gap-1">
                       <Paperclip className="w-3 h-3 text-emerald-400" />
-                      {getExportFilteredExpenses().filter(e => e.receiptUrl).length} facturas/archivos
+                      {getExportFilteredExpenses().filter(e => hasReceipt(e)).length} facturas/archivos
                     </span>
                   </div>
                 </div>
@@ -1721,19 +1815,25 @@ export default function Expenses({
 
             {/* Document / Image Preview Body */}
             <div className="p-6 overflow-y-auto flex-1 bg-slate-950/40 flex items-center justify-center min-h-[300px]">
-              {selectedReceiptExpense.receiptUrl ? (
-                selectedReceiptExpense.receiptType?.startsWith("image/") || selectedReceiptExpense.receiptUrl.startsWith("data:image/") ? (
+              {hasReceipt(selectedReceiptExpense) ? (
+                viewerError ? (
+                  <div className="text-center py-12 px-6 text-red-300 text-xs">{viewerError}</div>
+                ) : viewerLoading || !viewerSrc ? (
+                  <div className="flex items-center gap-2 py-12 text-slate-400 text-xs">
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-400" /> Cargando comprobante…
+                  </div>
+                ) : isImageAttachment(selectedReceiptExpense, viewerSrc) ? (
                   <div className="flex flex-col items-center max-w-full space-y-2">
                     <img
-                      src={selectedReceiptExpense.receiptUrl}
+                      src={viewerSrc}
                       alt={selectedReceiptExpense.receiptName || "Comprobante de factura"}
                       className="max-h-[55vh] max-w-full object-contain rounded-xl border border-slate-700 shadow-2xl bg-black/40"
                     />
                   </div>
-                ) : selectedReceiptExpense.receiptType === "application/pdf" || selectedReceiptExpense.receiptUrl.startsWith("data:application/pdf") ? (
+                ) : isPdfAttachment(selectedReceiptExpense, viewerSrc) ? (
                   <div className="w-full h-[55vh] rounded-xl overflow-hidden border border-slate-700 bg-slate-900">
                     <iframe
-                      src={selectedReceiptExpense.receiptUrl}
+                      src={viewerSrc}
                       title="Vista previa PDF"
                       className="w-full h-full border-0"
                     />
@@ -1783,7 +1883,16 @@ export default function Expenses({
                   Cerrar
                 </button>
 
-                {selectedReceiptExpense.receiptUrl && (
+                {hasReceipt(selectedReceiptExpense) && (selectedReceiptExpense.receiptPath ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadReceipt(selectedReceiptExpense)}
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs transition-all cursor-pointer flex items-center gap-2 shadow-lg shadow-indigo-600/20"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Descargar para AEAT / Hacienda</span>
+                  </button>
+                ) : (
                   <a
                     href={selectedReceiptExpense.receiptUrl}
                     download={
@@ -1797,7 +1906,7 @@ export default function Expenses({
                     <Download className="w-4 h-4" />
                     <span>Descargar para AEAT / Hacienda</span>
                   </a>
-                )}
+                ))}
               </div>
             </div>
 

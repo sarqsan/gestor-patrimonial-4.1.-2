@@ -1,3 +1,4 @@
+import { readApiJson } from "../lib/apiResponse";
 import React, { useState } from "react";
 import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
 import { 
@@ -221,13 +222,8 @@ export default function Dashboard({
             body: JSON.stringify({ fileData: rawBase64, mimeType })
           });
 
-          if (!response.ok) {
-            const errRes = await response.json();
-            throw new Error(errRes.error || "Fallo en la extracción de datos.");
-          }
-
           setScanStatusMsg("Leyendo base imponible, fecha y NIF fiscal...");
-          const result = await response.json();
+          const result = await readApiJson(response, "Fallo en la extracción de datos.");
           
           setExtractedResult(result);
           setScanning(false);
@@ -768,8 +764,7 @@ ${user2.hasPartner ? `Cónyuge: ${user2.name || "Usuario 2"} - DNI: ${user2.dni 
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify(bodyPayload),
                           });
-                          if (!response.ok) throw new Error("Fallo en la extracción");
-                          const res = await response.json();
+                          const res = await readApiJson(response, "Fallo en la extracción de la declaración.");
                           
                           const isConjunta = yearIntegrationMode === "conjunta";
                           const isUser1 = yearIntegrationMode === "user1";

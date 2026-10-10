@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Onboarding from "./components/Onboarding";
 import Dashboard from "./components/Dashboard";
 import Properties from "./components/Properties";
@@ -8,8 +8,11 @@ import SyncStatus from "./components/SyncStatus";
 import AuthScreen from "./components/AuthScreen";
 import Expenses from "./components/Expenses";
 import ContractCreator from "./components/ContractCreator";
-import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, getThemeColors } from "./types";
+import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, SaveStatus, getThemeColors } from "./types";
+import { estimatePayloadBytes, PORTFOLIO_DOC_SAFE_BYTES } from "./lib/attachmentRules";
+import { portfolioBody } from "./lib/portfolioPayload";
 import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
+import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
 import { 
   Menu, 
   ChevronDown, 
@@ -30,6 +33,25 @@ import {
 
 // Standard Spanish lease months
 const MONTHS = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+// Traduce errores de Firestore a mensajes visibles para el usuario.
+function describePersistenceError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code ?? "";
+  if (code === "permission-denied") {
+    return "Firestore ha rechazado la escritura (permisos). Los cambios no se han guardado en la nube.";
+  }
+  if (/exceeds|maximum size|1 ?MiB/i.test(msg)) {
+    return "El documento de la cartera supera el tamaño máximo de Firestore (1 MiB). Los cambios no se han guardado en la nube.";
+  }
+  if (code === "unavailable") {
+    return "Firestore no está disponible ahora mismo. Los cambios se conservan en este navegador; pulsa Reintentar.";
+  }
+  return `No se ha podido guardar en la nube (${msg}). Pulsa Reintentar.`;
+}
+
+const PORTFOLIO_BLOCKED_MESSAGE = (kb: number) =>
+  `La cartera ocupa ${kb} KB y supera el límite por documento de Firestore (1 MiB). Los nuevos adjuntos ya se guardan en Storage, pero el documento histórico necesita migración antes de poder guardar más datos. Los cambios NO se han guardado en la nube.`;
 
 export default function App() {
   const [state, setState] = useState<AppState>({
@@ -98,8 +120,104 @@ export default function App() {
     }));
   }, []);
 
-  // Save to LocalStorage and handle automated sync events
+  // ---- Persistencia ---------------------------------------------------------
+  // updateState solo calcula el nuevo estado (sin efectos secundarios dentro del updater).
+  // El guardado (localStorage + Firestore) ocurre en un efecto que solo actúa sobre
+  // cambios locales (localChangeRef). Los datos recibidos de la nube nunca se reescriben.
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: "idle" });
+  const localChangeRef = useRef(false);
+  const dirtyRef = useRef(false); // hay cambios locales aún no confirmados por Firestore
+  const lastSavedJsonRef = useRef<string | null>(null);
+  const writeSeqRef = useRef(0);
+  const lastOkSeqRef = useRef(0);
+
+
+  const persistPortfolio = (userId: string, s: AppState) => {
+    const body = portfolioBody(s);
+    const json = JSON.stringify(body);
+    const seq = ++writeSeqRef.current;
+
+    // Guardia de tamaño: no intentamos una escritura que Firestore va a rechazar.
+    const bytes = estimatePayloadBytes(body);
+    if (bytes > PORTFOLIO_DOC_SAFE_BYTES) {
+      dirtyRef.current = true;
+      setSaveStatus({ kind: "error", message: PORTFOLIO_BLOCKED_MESSAGE(Math.round(bytes / 1024)), blocked: true, at: Date.now() });
+      return;
+    }
+
+    // Evita escrituras idénticas a la última confirmada.
+    if (json === lastSavedJsonRef.current) {
+      dirtyRef.current = false;
+      setSaveStatus({ kind: "saved", at: Date.now() });
+      return;
+    }
+
+    setSaveStatus({ kind: "saving", at: Date.now() });
+    const path = `users/${userId}/data/portfolio`;
+    const userDocRef = doc(db, "users", userId, "data", "portfolio");
+
+    // Si Firestore no confirma la escritura (p. ej. sin conexión) no se muestra "Guardando…" para siempre.
+    let settled = false;
+    const slowTimer = setTimeout(() => {
+      if (!settled && seq === writeSeqRef.current) {
+        dirtyRef.current = true;
+        setSaveStatus({
+          kind: "error",
+          message: "La nube no ha confirmado el guardado tras 20 segundos (¿sin conexión?). Los cambios siguen en este navegador y Firestore seguirá intentando enviarlos.",
+          at: Date.now(),
+        });
+      }
+    }, 20000);
+
+    setDoc(userDocRef, { ...JSON.parse(json), updatedAt: new Date().toISOString() }, { merge: true })
+      .then(() => {
+        settled = true;
+        clearTimeout(slowTimer);
+        if (seq > lastOkSeqRef.current) {
+          lastOkSeqRef.current = seq;
+          lastSavedJsonRef.current = json;
+        }
+        if (seq === writeSeqRef.current) {
+          dirtyRef.current = false;
+          setSaveStatus({ kind: "saved", at: Date.now() });
+        }
+      })
+      .catch((err) => {
+        settled = true;
+        clearTimeout(slowTimer);
+        dirtyRef.current = true;
+        handleFirestoreError(err, OperationType.WRITE, path);
+        if (seq === writeSeqRef.current) {
+          setSaveStatus({ kind: "error", message: describePersistenceError(err), at: Date.now() });
+        }
+      });
+  };
+
+  // Efecto de guardado: copia local siempre que cambie el estado; nube solo ante cambios locales.
+  useEffect(() => {
+    if (!state.currentUser) return;
+    try {
+      localStorage.setItem(`rentasync_state_${state.currentUser}`, JSON.stringify(state));
+    } catch (e) {
+      console.error("Local copy save error:", e);
+      setSaveStatus({
+        kind: "error",
+        message: "No se ha podido guardar la copia local de este navegador (almacenamiento lleno). La nube no se ha modificado por este motivo.",
+        at: Date.now(),
+      });
+    }
+    if (!localChangeRef.current) return;
+    localChangeRef.current = false;
+    persistPortfolio(state.currentUser, state);
+  }, [state]);
+
+  const retrySave = () => {
+    if (!state.currentUser) return;
+    persistPortfolio(state.currentUser, state);
+  };
+
   const updateState = (updater: (prev: AppState) => AppState) => {
+    localChangeRef.current = true;
     setState((prev) => {
       let next = updater(prev);
 
@@ -137,39 +255,6 @@ export default function App() {
         });
       }
 
-      if (next.currentUser) {
-        localStorage.setItem(`rentasync_state_${next.currentUser}`, JSON.stringify(next));
-
-        // Asynchronously persist to Firebase Firestore
-        try {
-          const path = `users/${next.currentUser}/data/portfolio`;
-          const userDocRef = doc(db, "users", next.currentUser, "data", "portfolio");
-          const payload = JSON.parse(
-            JSON.stringify({
-              user1: next.user1,
-              user2: next.user2,
-              properties: next.properties || [],
-              payments: next.payments || [],
-              expenses: next.expenses || [],
-              contracts: next.contracts || [],
-              syncEvents: next.syncEvents || [],
-              syncEnabled: next.syncEnabled ?? true,
-              isOnboarded: next.isOnboarded ?? true,
-              currentYear: next.currentYear || 2026,
-              yearlyProfiles: next.yearlyProfiles || {},
-              theme: next.theme || "slate-indigo",
-              updatedAt: new Date().toISOString()
-            })
-          );
-          setDoc(userDocRef, payload, { merge: true }).catch((err) => {
-            handleFirestoreError(err, OperationType.WRITE, path);
-          });
-        } catch (e) {
-          console.error("Firestore save error:", e);
-        }
-      } else {
-        localStorage.setItem("rentasync_state", JSON.stringify(next));
-      }
       return next;
     });
   };
@@ -183,6 +268,7 @@ export default function App() {
 
     // Initial fetch from Firestore
     getDoc(userDocRef).then((snapshot) => {
+      if (dirtyRef.current) return; // cambios locales pendientes: no sobrescribir con la nube
       if (snapshot.exists()) {
         const cloudData = snapshot.data();
         setState((prev) => ({
@@ -205,6 +291,8 @@ export default function App() {
 
     // Subscribe to real-time updates
     const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      // Si hay cambios locales sin confirmar, no los reemplazamos silenciosamente por la nube.
+      if (dirtyRef.current) return;
       if (docSnap.exists()) {
         const cloudData = docSnap.data();
         setState((prev) => ({
@@ -249,7 +337,7 @@ export default function App() {
       syncEvents: [newEvent, ...prev.syncEvents].slice(0, 100) // Keep last 100 events
     }));
 
-    triggerNotification(`🔄 Auto-Sincronización: ${action}`);
+    triggerNotification(`📝 ${action}`);
   };
 
   // ONBOARDING COMPLETE
@@ -495,6 +583,14 @@ export default function App() {
       `Gasto registrado: ${newExpense.amount}€`,
       `Registrado gasto de ${newExpense.amount}€ en concepto de "${newExpense.category}" para el inmueble en ${prop ? prop.address.split(",")[0] : "Desconocido"}. Sincronizado para deducción del IRPF.`
     );
+  };
+
+  // UPDATE RECEIPT REFERENCE OF AN EXISTING EXPENSE (functional update, no stale list)
+  const handleUpdateExpenseReceipt = (id: string, patch: Partial<PropertyExpense>) => {
+    updateState((prev) => ({
+      ...prev,
+      expenses: (prev.expenses || []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
+    }));
   };
 
   // DELETE EXPENSE
@@ -809,6 +905,9 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    if (dirtyRef.current && !confirm("Hay cambios que NO se han guardado en la nube. Si cierras sesión ahora, solo quedarán en este navegador. ¿Cerrar sesión de todos modos?")) {
+      return;
+    }
     // Save current user state before clearing
     if (state.currentUser) {
       localStorage.setItem(`rentasync_state_${state.currentUser}`, JSON.stringify(state));
@@ -970,6 +1069,38 @@ export default function App() {
         </div>
       )}
 
+      {/* PERSISTENCE STATUS BANNER (errores reales de guardado) */}
+      {(saveStatus.kind === "error" || saveStatus.kind === "saving") && (
+        <div
+          role={saveStatus.kind === "error" ? "alert" : "status"}
+          className={`mx-auto max-w-7xl w-full px-4 sm:px-6 pt-4`}
+        >
+          <div className={`flex flex-wrap items-start gap-3 rounded-xl border px-4 py-3 text-xs ${
+            saveStatus.kind === "error"
+              ? "bg-red-950/40 border-red-500/40 text-red-200"
+              : "bg-slate-900 border-slate-700 text-slate-300"
+          }`}>
+            {saveStatus.kind === "error" ? (
+              <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+            ) : (
+              <Loader2 className="w-4 h-4 shrink-0 animate-spin text-indigo-400 mt-0.5" />
+            )}
+            <span className="flex-1 min-w-[200px]">
+              {saveStatus.kind === "error" ? saveStatus.message : "Guardando cambios en la nube…"}
+            </span>
+            {saveStatus.kind === "error" && !saveStatus.blocked && (
+              <button
+                type="button"
+                onClick={retrySave}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-100 font-semibold cursor-pointer"
+              >
+                <RotateCw className="w-3.5 h-3.5" /> Reintentar
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* PRIMARY WORKSPACE */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8">
         
@@ -986,6 +1117,7 @@ export default function App() {
         
         {activeTab === "properties" && (
           <Properties 
+            currentUser={state.currentUser}
             properties={state.properties} 
             onAddProperty={handleAddProperty}
             onEditProperty={handleEditProperty}
@@ -1007,6 +1139,8 @@ export default function App() {
             onAddExpense={handleAddExpense}
             onDeleteExpense={handleDeleteExpense}
             onImportExpenses={handleImportExpenses}
+            onUpdateExpenseReceipt={handleUpdateExpenseReceipt}
+            currentUser={state.currentUser}
             user1Name={state.user1.name}
             currentYear={state.currentYear || 2026}
           />
@@ -1025,6 +1159,8 @@ export default function App() {
         {activeTab === "sync" && (
           <SyncStatus 
             state={state} 
+            saveStatus={saveStatus}
+            onRetrySave={retrySave}
             onToggleSync={handleToggleSync} 
             onClearLog={handleClearLog} 
           />
