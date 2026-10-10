@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
-import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
 import { externalizeImportedExpenses } from "../lib/importAttachments";
 import { extractYearFromDate, normalizeDateToIso, isDateOlderThanYears } from "../lib/dateUtils";
 import {
@@ -143,7 +143,14 @@ export default function Expenses({
     setViewerError(null);
     const exp = selectedReceiptExpense;
     if (!exp) return;
-    if (exp.receiptPath) {
+    if (exp.receiptVaultId) {
+      // Almacenamiento remoto propio: descarga autorizada y URL local para el visor.
+      setViewerLoading(true);
+      getAttachmentBlob({ vaultId: exp.receiptVaultId })
+        .then((blob) => { if (!cancelled) setViewerSrc(URL.createObjectURL(blob)); })
+        .catch((err) => { if (!cancelled) setViewerError(err instanceof Error ? err.message : "No se pudo cargar el comprobante."); })
+        .finally(() => { if (!cancelled) setViewerLoading(false); });
+    } else if (exp.receiptPath) {
       setViewerLoading(true);
       getAttachmentPreviewUrl(exp.receiptPath)
         .then((url) => { if (!cancelled) setViewerSrc(url); })
@@ -206,13 +213,15 @@ export default function Expenses({
         folder: "expenses",
         file,
         attachmentId: newAttachmentId("rcpt"),
+        movementId: expenseId,
       });
-      onUpdateExpenseReceipt(expenseId, {
-        receiptPath: stored.storagePath,
-        receiptName: stored.name,
-        receiptType: stored.contentType,
-        receiptUrl: undefined,
-      });
+      onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
+      if (stored.mode === "local-inline") {
+        alert(
+          "El almacenamiento remoto no está disponible ahora mismo: el comprobante queda en la COLA LOCAL de este " +
+          "navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
+        );
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "No se pudo subir el comprobante.");
     }
@@ -221,6 +230,7 @@ export default function Expenses({
   const handleDownloadReceipt = async (exp: PropertyExpense) => {
     try {
       await downloadAttachment({
+        vaultId: exp.receiptVaultId,
         storagePath: exp.receiptPath,
         inlineData: exp.receiptUrl,
         fileName: exp.receiptName || `comprobante_${exp.id}`,
@@ -347,7 +357,7 @@ export default function Expenses({
         }
 
         try {
-          const blob = await getAttachmentBlob({ storagePath: exp.receiptPath, inlineData: exp.receiptUrl });
+          const blob = await getAttachmentBlob({ vaultId: exp.receiptVaultId, storagePath: exp.receiptPath, inlineData: exp.receiptUrl });
           receiptsFolder?.file(fileName, await blob.arrayBuffer());
         } catch (err) {
           console.error("No se pudo añadir el comprobante al ZIP:", exp.id, err);
@@ -570,12 +580,9 @@ export default function Expenses({
           folder: "expenses",
           file: pendingReceiptFile,
           attachmentId: newAttachmentId("rcpt"),
+          movementId: editingExpense?.id ?? expenseId,
         });
-        receiptFields = {
-          receiptPath: stored.storagePath,
-          receiptName: stored.name,
-          receiptType: stored.contentType,
-        };
+        receiptFields = expenseReceiptFieldsFromStored(stored);
       } catch (err) {
         setIsSavingExpense(false);
         setReceiptError(err instanceof Error ? err.message : "No se pudo subir el comprobante. La operación no se ha guardado.");

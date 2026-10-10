@@ -1,5 +1,5 @@
 import { readApiJson } from "../lib/apiResponse";
-import { uploadAttachment } from "../lib/attachments";
+import { uploadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
 import { newAttachmentId } from "../lib/attachmentRules";
 import React, { useState } from "react";
 import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
@@ -266,8 +266,15 @@ export default function Dashboard({
           folder: "expenses",
           file: scannedFile,
           attachmentId: newAttachmentId("rcpt"),
+          propertyId: propId,
         });
-        receiptFields = { receiptPath: stored.storagePath, receiptName: stored.name, receiptType: stored.contentType };
+        receiptFields = expenseReceiptFieldsFromStored(stored);
+        if (stored.mode === "local-inline") {
+          alert(
+            "El almacenamiento remoto no está disponible ahora mismo: la factura queda en la COLA LOCAL de este " +
+            "navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
+          );
+        }
       } catch (err) {
         setScanError(err instanceof Error ? err.message : "No se pudo guardar la factura. El gasto no se ha registrado.");
         setSavingScan(false);

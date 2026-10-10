@@ -4,6 +4,10 @@
 
 - `users/{u}/data/portfolio` (Firestore) guarda solo datos estructurados y **referencias** a Storage
   (`receiptPath`, `storagePath`). Ningún archivo nuevo se escribe en Base64.
+  **Excepción transitoria**: si el proyecto Firebase bloquea la sesión con
+  `auth/admin-restricted-operation`, los comprobantes de gastos y documentos de inmueble nuevos se
+  guardan como data URL en la copia local del usuario (formato legado) hasta restablecer el acceso;
+  véase `docs/incidencia-auth-admin-restricted-operation.md` (Apéndice B).
 - Adjuntos: `users/{u}/attachments/{carpeta}/{id}/{nombre}` (carpetas `expenses`, `property-documents`, `contracts`).
 - Copias de seguridad de la cartera: `users/{u}/backups/portfolio/{sha256}.json` en Storage (JSON completo,
   direccionado por contenido). El índice pequeño vive en `users/{u}/backups/{sha256}` (Firestore, solo metadatos).

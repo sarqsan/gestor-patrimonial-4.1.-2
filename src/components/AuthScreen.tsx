@@ -13,7 +13,8 @@ import {
 } from "lucide-react";
 
 interface AuthScreenProps {
-  onLoginSuccess: (username: string, registeredUsers: Record<string, string>) => void;
+  /** La contraseña se entrega solo para establecer la sesión del almacenamiento remoto (vault). */
+  onLoginSuccess: (username: string, registeredUsers: Record<string, string>, password: string) => void;
   onRegisterSuccess?: (registeredUsers: Record<string, string>) => void;
   registeredUsersInitial: Record<string, string>;
 }
@@ -102,7 +103,7 @@ export default function AuthScreen({
       }
 
       // Login success
-      onLoginSuccess(cleanUsername, registeredUsers);
+      onLoginSuccess(cleanUsername, registeredUsers, password);
     }
   };
 

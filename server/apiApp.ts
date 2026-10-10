@@ -3,9 +3,12 @@
 //  - api/[...route].ts (Vercel, funciones serverless)
 // Mover estas rutas no cambia su comportamiento.
 import express from "express";
+import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
+import { createVaultRouter } from "./vault/routes.js";
+import { VaultStore } from "./vault/store.js";
 
 dotenv.config();
 
@@ -73,8 +76,17 @@ async function generateContentWithRetry(
 export function createApiApp() {
   const app = express();
 
-  // Middleware for JSON payloads
-  app.use(express.json({ limit: "10mb" }));
+  // Middleware for JSON payloads. 15mb: los archivos del vault viajan como Base64 en JSON
+  // (10 MB binarios ≈ 13,4 MB Base64 + envoltura). El límite binario real (10 MB) se
+  // valida en el vault, no aquí.
+  app.use(express.json({ limit: "15mb" }));
+
+  // ---- Vault: almacenamiento remoto persistente propio (auth, movimientos, archivos, copias) ----
+  // Directorio de datos: volumen persistente en producción (RENTASYNC_VAULT_DIR, p. ej. /var/data
+  // con un disco adjunto en Render). Ver docs/propuesta-almacenamiento-remoto.md.
+  const vaultDir = process.env.RENTASYNC_VAULT_DIR || path.join(process.cwd(), "data", "vault");
+  const vaultStore = new VaultStore(vaultDir);
+  app.use("/api/vault", createVaultRouter({ store: vaultStore }));
 
   // API Route: Extract tax declaration details using Gemini 3.5 Flash
   app.post("/api/extract", async (req, res) => {

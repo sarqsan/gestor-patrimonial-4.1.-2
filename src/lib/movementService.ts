@@ -125,9 +125,10 @@ export function sanitizeMovementForFirestore(
 
   if (movement.description) docData.description = movement.description.trim();
   if (movement.receiptPath) docData.receiptPath = movement.receiptPath;
+  if (movement.receiptVaultId) docData.receiptVaultId = movement.receiptVaultId;
   if (movement.receiptName) docData.receiptName = movement.receiptName;
   if (movement.receiptType) docData.receiptType = movement.receiptType;
-  if (movement.receiptUrl && !movement.receiptPath) docData.receiptUrl = movement.receiptUrl;
+  if (movement.receiptUrl && !movement.receiptPath && !movement.receiptVaultId) docData.receiptUrl = movement.receiptUrl;
 
   return docData;
 }
@@ -235,6 +236,7 @@ export async function fetchMovements(
         date: data.date,
         description: data.description,
         receiptPath: data.receiptPath,
+        receiptVaultId: data.receiptVaultId,
         receiptName: data.receiptName,
         receiptType: data.receiptType,
         receiptUrl: data.receiptUrl,
@@ -272,21 +274,22 @@ export function subscribeMovements(
       const movements: PropertyExpense[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data();
-        movements.push({
-          id: data.id || docSnap.id,
-          propertyId: data.propertyId,
-          category: data.category,
-          amount: Number(data.amount),
-          date: data.date,
-          description: data.description,
-          receiptPath: data.receiptPath,
-          receiptName: data.receiptName,
-          receiptType: data.receiptType,
-          receiptUrl: data.receiptUrl,
-          type: data.type || (data.category === "rent" ? "ingreso" : "gasto"),
-        });
+      movements.push({
+        id: data.id || docSnap.id,
+        propertyId: data.propertyId,
+        category: data.category,
+        amount: Number(data.amount),
+        date: data.date,
+        description: data.description,
+        receiptPath: data.receiptPath,
+        receiptVaultId: data.receiptVaultId,
+        receiptName: data.receiptName,
+        receiptType: data.receiptType,
+        receiptUrl: data.receiptUrl,
+        type: data.type || (data.category === "rent" ? "ingreso" : "gasto"),
       });
-      movements.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
+    });
+    movements.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
       onUpdate(movements);
     },
     (err) => {
@@ -423,6 +426,11 @@ export function reconcileMovements(
       // Si el local tiene un justificante recién añadido y el remoto no lo tiene aún, conservarlo
       if (normLoc.receiptPath && !existingById.receiptPath) {
         existingById.receiptPath = normLoc.receiptPath;
+        existingById.receiptName = normLoc.receiptName;
+        existingById.receiptType = normLoc.receiptType;
+      }
+      if (normLoc.receiptVaultId && !existingById.receiptVaultId) {
+        existingById.receiptVaultId = normLoc.receiptVaultId;
         existingById.receiptName = normLoc.receiptName;
         existingById.receiptType = normLoc.receiptType;
       }

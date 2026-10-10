@@ -279,6 +279,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
         pdfName,
         pdfSize: "Legal Word Format (Auto)",
         pdfPath: stored.storagePath,
+        pdfVaultId: stored.vaultId,
       }
     };
 

@@ -140,9 +140,9 @@ export function estimatePayloadBytes(payload: unknown): number {
   return new TextEncoder().encode(JSON.stringify(payload)).length;
 }
 
-/** Un registro tiene comprobante si tiene referencia a Storage o un archivo histórico. */
-export function hasReceipt(exp: { receiptUrl?: string; receiptPath?: string }): boolean {
-  return !!(exp.receiptPath || exp.receiptUrl);
+/** Un registro tiene comprobante si tiene referencia al vault, a Storage o un archivo histórico. */
+export function hasReceipt(exp: { receiptUrl?: string; receiptPath?: string; receiptVaultId?: string }): boolean {
+  return !!(exp.receiptPath || exp.receiptVaultId || exp.receiptUrl);
 }
 
 /** Lista los adjuntos históricos incrustados en la cartera (solo lectura, sin escribir nada). */

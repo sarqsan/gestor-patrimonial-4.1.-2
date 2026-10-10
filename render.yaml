@@ -5,8 +5,21 @@ services:
     plan: free
     buildCommand: npm install && npm run build
     startCommand: npm run start
+    # Volumen persistente del vault (almacenamiento remoto de comprobantes/contratos/documentos).
+    # Sin disco adjunto, Render borra el sistema de ficheros en cada redepliegue: los archivos
+    # solo durarían hasta el siguiente deploy. Adjuntar un disco requiere una instancia de pago
+    # (Render no permite discos en el plan gratuito): al sincronizar el blueprint, Render pedirá
+    # actualizar el plan. Hasta entonces, el vault responde con error en cada operación y la app
+    # degrada a su cola local sin falsos éxitos (ver docs/propuesta-almacenamiento-remoto.md).
+    disks:
+      - name: vault-data
+        mountPath: /var/data
+        sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
       - key: GEMINI_API_KEY
         sync: false
+      # Directorio de datos del vault: debe apuntar al disco montado para persistencia real.
+      - key: RENTASYNC_VAULT_DIR
+        value: /var/data

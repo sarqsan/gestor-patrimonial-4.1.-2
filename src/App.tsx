@@ -24,6 +24,15 @@ import {
   movementSignature 
 } from "./lib/movementService";
 import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
+import {
+  vaultEnsureSession,
+  vaultGetMovements,
+  vaultPutMovements,
+  clearVaultToken,
+  getVaultToken,
+  setActiveVaultUser,
+  flushQueuedReceiptsToVault,
+} from "./lib/vaultClient";
 import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
 import { 
   Menu, 
@@ -226,6 +235,28 @@ export default function App() {
     localChangeRef.current = false;
     persistPortfolio(state.currentUser, state);
   }, [state]);
+
+  // Sincronización de movimientos con el almacenamiento remoto propio (vault):
+  // reflejo idempotente y best-effort, con debounce para no saturar en edición intensa.
+  const vaultSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!state.isAuthenticated || !state.currentUser) return;
+    const user = state.currentUser;
+    if (!getVaultToken(user)) return;
+    const movements = state.expenses ?? [];
+    if (vaultSyncTimerRef.current) clearTimeout(vaultSyncTimerRef.current);
+    vaultSyncTimerRef.current = setTimeout(() => {
+      vaultPutMovements(user, movements).catch((err) => {
+        console.warn("[vault] Sincronización de movimientos en segundo plano fallida:", err);
+      });
+    }, 1500);
+    return () => {
+      if (vaultSyncTimerRef.current) {
+        clearTimeout(vaultSyncTimerRef.current);
+        vaultSyncTimerRef.current = null;
+      }
+    };
+  }, [state.expenses, state.currentUser, state.isAuthenticated]);
 
   // Tras migrar o restaurar, la pantalla adopta el resultado de la nube.
   // - Migración: solo se aplican las referencias a Storage sobre el estado actual (no se pierden
@@ -1007,7 +1038,7 @@ export default function App() {
     triggerNotification(`📊 ¡Declaración fiscal del ejercicio ${year} integrada correctamente!`);
   };
 
-  const handleLoginSuccess = (username: string, updatedRegisteredUsers: Record<string, string>) => {
+  const handleLoginSuccess = (username: string, updatedRegisteredUsers: Record<string, string>, password: string) => {
     // 1. Save users list globally
     localStorage.setItem("rentasync_users", JSON.stringify(updatedRegisteredUsers));
     
@@ -1065,6 +1096,35 @@ export default function App() {
     setState(loadedState);
     localStorage.setItem("rentasync_session", JSON.stringify({ currentUser: username, isAuthenticated: true }));
     triggerNotification(`🔑 ¡Sesión iniciada como ${username}!`);
+
+    // 4. Almacenamiento remoto propio (vault): sesión con las MISMAS credenciales de la
+    //    aplicación y reconciliación bidireccional idempotente de movimientos. Si el vault
+    //    no está disponible, la app sigue funcionando en modo degradado (copia local).
+    const localMovements: PropertyExpense[] = loadedState.expenses ?? [];
+    vaultEnsureSession(username, password)
+      .then(async () => {
+        try {
+          const remote = (await vaultGetMovements(username)) as PropertyExpense[];
+          const merged = reconcileMovements(localMovements, remote);
+          // Externaliza al vault los comprobantes que quedaron en la COLA LOCAL (recibos
+          // Base64 guardados cuando el remoto no estaba disponible). Mejor esfuerzo.
+          try {
+            const flushed = await flushQueuedReceiptsToVault(username, merged);
+            if (flushed > 0) {
+              console.log(`[vault] Cola local: ${flushed} comprobante(s) externalizado(s) al almacenamiento remoto.`);
+            }
+          } catch (flushErr) {
+            console.warn("[vault] No se pudieron externalizar los comprobantes en cola:", flushErr);
+          }
+          setState((prev) => (prev.currentUser === username ? { ...prev, expenses: merged } : prev));
+          await vaultPutMovements(username, merged);
+        } catch (err) {
+          console.warn("[vault] Sincronización de movimientos en el login no completada:", err);
+        }
+      })
+      .catch((err) => {
+        console.warn("[vault] Sin sesión de almacenamiento remoto (modo degradado local):", err);
+      });
   };
 
   const handleRegisterSuccess = (updatedRegisteredUsers: Record<string, string>) => {
@@ -1083,6 +1143,9 @@ export default function App() {
     // Save current user state before clearing
     if (state.currentUser) {
       localStorage.setItem(`rentasync_state_${state.currentUser}`, JSON.stringify(state));
+      // Cierre de la sesión del almacenamiento remoto (el token guardado se retira).
+      clearVaultToken(state.currentUser);
+      setActiveVaultUser(null);
     }
     
     // Clear session in localStorage

@@ -2,7 +2,7 @@
 // New attachments are stored in Storage and referenced from Firestore by storagePath only.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
 import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
-import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError } from "./firebase";
+import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError } from "./firebase";
 import {
   AttachmentFolder,
   attachmentStoragePath,
@@ -13,8 +13,32 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "./attachmentRules";
 import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./verifiedObjectStore";
+import {
+  LOCAL_INLINE_MAX_RAW_BYTES,
+  blobToDataUrl,
+  dataUrlApproxChars,
+  estimateLocalFreeChars,
+  localInlineBudgetProblem,
+  localInlineCapacityProblem,
+  maybeDownscaleImage,
+} from "./localVault";
+import {
+  VaultAuthError,
+  VaultError,
+  getActiveVaultUser,
+  getVaultToken,
+  vaultDownloadFile,
+  vaultUploadFile,
+} from "./vaultClient";
+import type { PropertyExpense } from "../types";
 
 export class AttachmentError extends Error {}
+
+/**
+ * Fallo de sesión por restricción ADMINISTRATIVA del proyecto Firebase
+ * (auth/admin-restricted-operation). No es un fallo de red: reintentar no lo resuelve.
+ */
+export class AdminRestrictedAttachmentError extends AttachmentError {}
 
 const AUTH_TIMEOUT_MS = 15_000;
 const UPLOAD_TIMEOUT_MS = 60_000;
@@ -47,6 +71,18 @@ async function ensureSignedIn(): Promise<void> {
     }
     const code = err?.code || "";
     const detail = describeAuthError(err);
+    if (isAdministrativeAuthError(err)) {
+      // Rechazo administrativo del servicio (p. ej. auth/admin-restricted-operation):
+      // NO es un fallo transitorio de red y ningún reintento de cliente puede resolverlo.
+      // Se comunica como bloqueo de configuración del proyecto Firebase, sin confundirlo
+      // con problemas de conexión ni agotar el tiempo de espera.
+      throw new AdminRestrictedAttachmentError(
+        `Firebase Auth ha rechazado la sesión por una restricción administrativa del proyecto Firebase ` +
+          `(${code}: ${detail}). Este bloqueo no puede resolverse desde la ` +
+          `aplicación: requiere revisar la configuración de Authentication/Identity Platform del proyecto ` +
+          `en la consola de Firebase.`
+      );
+    }
     const msg = code
       ? `No se ha podido iniciar la sesión anónima de Firebase (${code}: ${detail}); el archivo no se ha subido.`
       : `No se ha podido iniciar la sesión anónima de Firebase (${detail}); el archivo no se ha subido.`;
@@ -55,10 +91,104 @@ async function ensureSignedIn(): Promise<void> {
 }
 
 export interface StoredAttachment {
-  storagePath: string;
+  /** Ruta en Firebase Storage (solo en modo "storage"). */
+  storagePath?: string;
+  /** Referencia al vault, el almacenamiento remoto propio (solo en modo "vault"). */
+  vaultId?: string;
+  /** Data URL en la copia local del usuario (solo en modo "local-inline": cola temporal). */
+  inlineData?: string;
+  /**
+   * "vault": almacenamiento remoto persistente propio (destino definitivo actual).
+   * "storage": Firebase Storage (si el proyecto Firebase vuelve a dar sesión).
+   * "local-inline": cola local temporal por indisponibilidad del almacenamiento remoto;
+   *   se sincronizará con el destino remoto en cuanto esté disponible.
+   */
+  mode: "vault" | "storage" | "local-inline";
   name: string;
   contentType: string;
   size: number;
+}
+
+/**
+ * Campos de comprobante de operación a partir del resultado de una subida.
+ * Cada modo escribe SU referencia y limpia las demás para no mezclar orígenes:
+ * vault → receiptVaultId; Storage → receiptPath; cola local → receiptUrl (legado).
+ */
+export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partial<PropertyExpense> {
+  if (stored.mode === "vault") {
+    return {
+      receiptVaultId: stored.vaultId,
+      receiptName: stored.name,
+      receiptType: stored.contentType,
+      receiptPath: undefined,
+      receiptUrl: undefined,
+    };
+  }
+  if (stored.mode === "local-inline") {
+    return {
+      receiptUrl: stored.inlineData,
+      receiptName: stored.name,
+      receiptType: stored.contentType,
+      receiptPath: undefined,
+      receiptVaultId: undefined,
+    };
+  }
+  return {
+    receiptPath: stored.storagePath,
+    receiptName: stored.name,
+    receiptType: stored.contentType,
+    receiptUrl: undefined,
+    receiptVaultId: undefined,
+  };
+}
+
+/**
+ * Vía de contingencia SOLO ante bloqueo administrativo (auth/admin-restricted-operation):
+ * guarda el adjunto como data URL (formato legado) para la copia local del usuario.
+ * No escribe en Firebase, no cambia reglas ni rutas de Storage, no reasigna nada.
+ *
+ * Antifalso-éxito: antes de confirmar, comprueba presupuesto por archivo Y capacidad
+ * real de localStorage. Si no cabe, lanza un error claro y el archivo NO se da por guardado.
+ */
+async function storeLocalInlineFallback(file: File): Promise<StoredAttachment> {
+  let candidate: Blob = file;
+  let contentType = resolveContentType(file.name, file.type);
+
+  // Imágenes por encima del presupuesto: intentar reducción en el navegador.
+  if (file.size > LOCAL_INLINE_MAX_RAW_BYTES && contentType.startsWith("image/")) {
+    const downscaled = await maybeDownscaleImage(file, LOCAL_INLINE_MAX_RAW_BYTES);
+    if (downscaled) {
+      candidate = downscaled;
+      contentType = downscaled.type || "image/jpeg";
+    }
+  }
+
+  const problem = localInlineBudgetProblem({ size: candidate.size });
+  if (problem) {
+    throw new AdminRestrictedAttachmentError(
+      `Firebase Auth está bloqueado por administración y el archivo no cabe en la vía local: ${problem}`
+    );
+  }
+
+  // Capacidad real del almacenamiento local: no confirmar un guardado que el navegador rechazará.
+  const capacityProblem = localInlineCapacityProblem({
+    dataUrlChars: dataUrlApproxChars(candidate.size),
+    freeChars: estimateLocalFreeChars(),
+  });
+  if (capacityProblem) {
+    throw new AdminRestrictedAttachmentError(
+      `Firebase Auth está bloqueado por administración y ${capacityProblem}`
+    );
+  }
+
+  const inlineData = await blobToDataUrl(candidate, contentType);
+  return {
+    mode: "local-inline",
+    inlineData,
+    name: file.name,
+    contentType,
+    size: candidate.size,
+  };
 }
 
 /** Traduce códigos de Firebase Storage a mensajes que el usuario puede entender. */
@@ -91,15 +221,62 @@ export async function uploadAttachment(opts: {
   folder: AttachmentFolder;
   file: File;
   attachmentId?: string;
+  /** Vincula el archivo a su movimiento en el índice del vault (trazabilidad). */
+  movementId?: string;
+  /** Vincula el archivo a su inmueble en el índice del vault (trazabilidad). */
+  propertyId?: string;
   /** Solo para contratos generados (.doc). */
   allowWordDocument?: boolean;
 }): Promise<StoredAttachment> {
   const invalid = validateAttachment(opts.file, { allowWordDocument: opts.allowWordDocument });
   if (invalid) throw new AttachmentError(invalid);
 
-  await ensureSignedIn();
-
   const contentType = resolveContentType(opts.file.name, opts.file.type);
+
+  // ---- 1) VAULT: almacenamiento remoto persistente propio (destino definitivo). ----
+  // No depende de la sesión anónima de Firebase. Si hay sesión del vault para este
+  // usuario, el archivo viaja al backend de la aplicación y queda disponible entre
+  // sesiones y dispositivos.
+  if (getVaultToken(opts.userId)) {
+    try {
+      const bytes = new Uint8Array(await opts.file.arrayBuffer());
+      const meta = await withTimeout(
+        vaultUploadFile({
+          username: opts.userId,
+          bytes,
+          name: opts.file.name,
+          contentType,
+          movementId: opts.movementId,
+          propertyId: opts.propertyId,
+        }),
+        UPLOAD_TIMEOUT_MS,
+        "La subida al almacenamiento remoto ha superado el tiempo de espera. El archivo no se ha guardado; inténtalo de nuevo."
+      );
+      return { mode: "vault", vaultId: meta.id, name: opts.file.name, contentType, size: meta.size };
+    } catch (err) {
+      // Sesión inválida o rechazo del vault: degradar a Firebase y, en último término,
+      // a la cola local. Nunca se declara éxito sin confirmación del destino remoto.
+      if (!(err instanceof VaultAuthError || err instanceof VaultError || err instanceof AttachmentError)) {
+        throw err instanceof Error ? err : new AttachmentError(String(err));
+      }
+      console.warn("[attachments] Vault no disponible para la subida; se intenta Firebase:", err);
+    }
+  }
+
+  // ---- 2) FIREBASE STORAGE: si el proyecto Firebase vuelve a autorizar la sesión. ----
+  try {
+    await ensureSignedIn();
+  } catch (err) {
+    // Contingencia SOLO ante rechazo administrativo del proyecto Firebase: comprobantes
+    // de gastos y documentos de inmueble quedan en la COLA LOCAL (data URL) a la espera de
+    // sincronizarse con el destino remoto. Los contratos no tienen campo legado equivalente
+    // y las subidas verificadas (importaciones/migración) mantienen su comportamiento estricto.
+    if (err instanceof AdminRestrictedAttachmentError && opts.folder !== "contracts") {
+      return storeLocalInlineFallback(opts.file);
+    }
+    throw err;
+  }
+
   const attachmentId = opts.attachmentId ?? newAttachmentId("att");
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, attachmentId, opts.file.name);
 
@@ -115,12 +292,18 @@ export async function uploadAttachment(opts: {
     throw new AttachmentError(describeStorageError(err));
   }
 
-  return { storagePath, name: opts.file.name, contentType, size: opts.file.size };
+  return { mode: "storage", storagePath, name: opts.file.name, contentType, size: opts.file.size };
 }
 
 /** Espera a la sesión de Firebase (necesaria antes de cualquier operación de Storage). */
 export async function ensureFirebaseSession(): Promise<void> {
   await ensureSignedIn();
+}
+
+/** Resultado de una subida confirmada a Firebase Storage (importaciones, subidas verificadas). */
+export interface StorageStoredAttachment extends StoredAttachment {
+  mode: "storage";
+  storagePath: string;
 }
 
 /**
@@ -134,7 +317,7 @@ export async function uploadBytesVerified(opts: {
   fileName: string;
   contentType: string;
   bytes: Uint8Array;
-}): Promise<StoredAttachment> {
+}): Promise<StorageStoredAttachment> {
   await ensureSignedIn();
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, opts.attachmentId, opts.fileName);
   // Sin `update` en las reglas: si el objeto ya existe con el mismo contenido (reimportación),
@@ -170,7 +353,7 @@ export async function uploadBytesVerified(opts: {
     if (err instanceof ObjectConflictError) throw new AttachmentError(err.message);
     throw new AttachmentError(describeStorageError(err));
   }
-  return { storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
+  return { mode: "storage", storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
 }
 
 /** URL temporal para previsualizar (img/iframe). No se persiste en Firestore. */
@@ -198,8 +381,32 @@ export async function getAttachmentBytes(storagePath: string): Promise<Blob> {
   }
 }
 
-/** Devuelve el Blob de un adjunto nuevo (Storage) o histórico (data URL). */
-export async function getAttachmentBlob(source: { storagePath?: string; inlineData?: string }): Promise<Blob> {
+/**
+ * Devuelve el Blob de un adjunto. Prioridad de lectura (compatibilidad histórica):
+ *   1. vault (referencia vaultId del almacenamiento remoto propio)
+ *   2. Firebase Storage (storagePath)
+ *   3. legado incrustado (inlineData / receiptUrl / fileData, data URL)
+ */
+export async function getAttachmentBlob(source: {
+  vaultId?: string;
+  vaultUsername?: string;
+  storagePath?: string;
+  inlineData?: string;
+}): Promise<Blob> {
+  if (source.vaultId) {
+    const username = source.vaultUsername ?? getActiveVaultUser();
+    if (!username) throw new AttachmentError("No hay sesión del almacenamiento remoto para recuperar este archivo.");
+    try {
+      return await withTimeout(
+        vaultDownloadFile(username, source.vaultId),
+        UPLOAD_TIMEOUT_MS,
+        "La descarga del archivo ha superado el tiempo de espera."
+      );
+    } catch (err) {
+      if (err instanceof AttachmentError) throw err;
+      throw new AttachmentError(err instanceof Error ? err.message : String(err));
+    }
+  }
   if (source.storagePath) return getAttachmentBytes(source.storagePath);
   if (source.inlineData && isInlineDataUrl(source.inlineData)) {
     const res = await fetch(source.inlineData);
@@ -210,11 +417,18 @@ export async function getAttachmentBlob(source: { storagePath?: string; inlineDa
 
 /** Descarga un adjunto con el nombre original. */
 export async function downloadAttachment(opts: {
+  vaultId?: string;
+  vaultUsername?: string;
   storagePath?: string;
   inlineData?: string;
   fileName: string;
 }): Promise<void> {
-  const blob = await getAttachmentBlob({ storagePath: opts.storagePath, inlineData: opts.inlineData });
+  const blob = await getAttachmentBlob({
+    vaultId: opts.vaultId,
+    vaultUsername: opts.vaultUsername,
+    storagePath: opts.storagePath,
+    inlineData: opts.inlineData,
+  });
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = objectUrl;

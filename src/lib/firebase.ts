@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot, getDocFromServer } from "firebase/firestore";
-import { getAuth, signInAnonymously, User } from "firebase/auth";
+import { getAuth, signInAnonymously, User, Auth } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 import firebaseConfig from "../../firebase-applet-config.json" with { type: "json" };
 
@@ -15,6 +15,67 @@ export const auth = getAuth(app);
 // Firebase Storage usa el storageBucket de firebase-applet-config.json (no se inventa ningún bucket).
 export const storage = getStorage(app);
 
+/**
+ * Punto de inyección del mecanismo de inicio de sesión.
+ *
+ * La aplicación utiliza exclusivamente `signInAnonymously`. El punto de inyección
+ * existe únicamente para que las pruebas puedan reproducir de forma determinista
+ * los rechazos que devuelve el servicio (p. ej. `auth/admin-restricted-operation`,
+ * que el backend de Identity Platform devuelve como ADMIN_ONLY_OPERATION) sin
+ * depender de la red ni de la configuración administrativa del proyecto real.
+ */
+export type SignInDriver = (authInstance: Auth) => Promise<{ user: User }>;
+
+const defaultSignInDriver: SignInDriver = (authInstance) => signInAnonymously(authInstance);
+let activeSignInDriver: SignInDriver = defaultSignInDriver;
+
+/** SOLO PRUEBAS: sustituye la llamada real de inicio de sesión. `null` restaura la real. */
+export function __setSignInDriverForTests(driver: SignInDriver | null): void {
+  activeSignInDriver = driver ?? defaultSignInDriver;
+}
+
+/**
+ * Clasificación de errores de Firebase Auth a efectos de reintentos y mensajes.
+ *
+ * - "administrative": rechazo impuesto por la configuración administrativa del
+ *   proyecto Firebase (Identity Platform). No es un fallo transitorio de red y
+ *   ningún reintento de cliente puede resolverlo: exige un cambio en la consola
+ *   del proyecto (Authentication / Identity Platform).
+ * - "transient-network": fallo transitorio de red o de tiempo de espera; tiene
+ *   sentido reintentar.
+ * - "other": cualquier otro error (credenciales, configuración del cliente, etc.).
+ */
+export type AuthErrorClass = "administrative" | "transient-network" | "other";
+
+/** Códigos que el backend devuelve cuando la operación está restringida por administración. */
+export const ADMIN_RESTRICTED_AUTH_CODES: ReadonlySet<string> = new Set([
+  "auth/admin-restricted-operation",
+]);
+
+/** Códigos considerados fallo transitorio de red / tiempo de espera. */
+export const TRANSIENT_AUTH_CODES: ReadonlySet<string> = new Set([
+  "auth/network-request-failed",
+  "auth/timeout",
+]);
+
+/** Clasifica un error de Firebase Auth sin enmascarar su código original. */
+export function classifyAuthError(err: unknown): AuthErrorClass {
+  const code = (err as { code?: string })?.code ?? "";
+  if (ADMIN_RESTRICTED_AUTH_CODES.has(code)) return "administrative";
+  if (TRANSIENT_AUTH_CODES.has(code)) return "transient-network";
+  return "other";
+}
+
+/** Indica si el error es un rechazo administrativo del proyecto Firebase (no transitorio). */
+export function isAdministrativeAuthError(err: unknown): boolean {
+  return classifyAuthError(err) === "administrative";
+}
+
+/** Indica si el error es un fallo transitorio de red (reintentable). */
+export function isTransientNetworkAuthError(err: unknown): boolean {
+  return classifyAuthError(err) === "transient-network";
+}
+
 /** Traduce códigos de error de Firebase Auth a descripciones inteligibles para el usuario */
 export function describeAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code ?? "";
@@ -24,7 +85,7 @@ export function describeAuthError(err: unknown): string {
     case "auth/operation-not-allowed":
       return "El proveedor de autenticación anónima no está habilitado en este proyecto de Firebase.";
     case "auth/admin-restricted-operation":
-      return "Operación de autenticación restringida por el administrador de Firebase.";
+      return "La configuración administrativa del proyecto Firebase restringe esta operación de autenticación (rechazo ADMIN_ONLY_OPERATION del servicio). No es un fallo de red ni de la aplicación: debe revisarse la configuración de Authentication/Identity Platform del proyecto en la consola de Firebase.";
     case "auth/invalid-api-key":
       return "La API Key de Firebase no es válida.";
     case "auth/app-deleted":
@@ -78,7 +139,9 @@ export async function ensureFirebaseAuth(): Promise<User> {
         }
       }
 
-      const cred = await signInAnonymously(auth);
+      // La llamada real pasa por el punto de inyección (idéntica a signInAnonymously(auth)
+      // fuera de las pruebas), para poder reproducir determinísticamente los rechazos del servicio.
+      const cred = await activeSignInDriver(auth);
       lastAuthFailure = null;
       return cred.user;
     } catch (err: any) {
