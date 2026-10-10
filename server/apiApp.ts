@@ -361,5 +361,19 @@ Devuelve los importes como números decimales y las fechas en formato YYYY-MM-DD
     res.status(404).json({ error: "Ruta de API no encontrada." });
   });
 
+  // Errores de Express (p. ej. JSON mal formado o cuerpo demasiado grande) también en JSON.
+  // No se devuelve el stack ni datos de la petición.
+  app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const status = typeof err?.status === "number" && err.status >= 400 && err.status < 600 ? err.status : 500;
+    if (status >= 500) console.error("[api] Error no controlado:", err);
+    if (res.headersSent) return;
+    const message =
+      status === 400 ? "La petición no es un JSON válido."
+      : status === 413 ? "La petición supera el tamaño máximo admitido."
+      : status >= 500 ? "Error interno del servidor de análisis."
+      : "Petición no válida.";
+    res.status(status).json({ error: message });
+  });
+
   return app;
 }

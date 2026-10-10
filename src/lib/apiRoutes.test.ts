@@ -64,3 +64,28 @@ test("ruta /api inexistente responde 404 en JSON", async () => {
   const body = await res.json();
   assert.ok(body.error);
 });
+
+// Regresión: el runtime ESM de Vercel (Node) no resuelve imports relativos sin extensión.
+// Con "import ... from '../server/apiApp'" la función no arrancaba y Vercel devolvía un 500 sin JSON.
+test("los imports relativos de api/ y server/ llevan extensión .js", async () => {
+  const { readFileSync, readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = join(import.meta.dirname, "..", "..");
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const n of readdirSync(dir)) {
+      const p = join(dir, n);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (p.endsWith(".ts")) files.push(p);
+    }
+  };
+  walk(join(root, "api"));
+  walk(join(root, "server"));
+  const offenders: string[] = [];
+  for (const f of files) {
+    for (const m of readFileSync(f, "utf-8").matchAll(/(?:from|import)\s*\(?\s*"(\.{1,2}\/[^"]*)"/g)) {
+      if (!m[1].endsWith(".js")) offenders.push(`${f}: ${m[1]}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
