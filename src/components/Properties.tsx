@@ -2,6 +2,13 @@ import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense, TenantContractRecord, getEffectivePropertyFinancials } from "../types";
 import { validateAttachment, newAttachmentId } from "../lib/attachmentRules";
 import { uploadAttachment, downloadAttachment } from "../lib/attachments";
+import {
+  IMPORT_ACCEPT,
+  validateImportFileName,
+  parsePropertiesFromText,
+  parsePropertiesFromRows,
+  ImportIssue,
+} from "../lib/importParsers";
 import * as XLSX from "xlsx";
 import { 
   Building, 
@@ -81,6 +88,9 @@ export default function Properties({
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccessMsg, setImportSuccessMsg] = useState<string | null>(null);
+  const [importRejected, setImportRejected] = useState<ImportIssue[]>([]);
+  const [importWarnings, setImportWarnings] = useState<ImportIssue[]>([]);
+  const [importStructureNote, setImportStructureNote] = useState<string | null>(null);
   const [financialYear, setFinancialYear] = useState<number>(currentYear);
   const [docYear, setDocYear] = useState<number>(currentYear);
 
@@ -783,84 +793,51 @@ export default function Properties({
   const handleProcessImportFile = (file: File) => {
     setImportError(null);
     setImportSuccessMsg(null);
+    setImportPreviewData(null);
+    setImportRejected([]);
+    setImportWarnings([]);
+    setImportStructureNote(null);
+
+    // La validación del formato se hace SIEMPRE tras la selección del archivo
+    // (el filtro del selector del sistema no es fiable en Android), con un
+    // mensaje claro si el formato no está admitido.
+    const formatError = validateImportFileName(file.name);
+    if (formatError) {
+      setImportError(formatError);
+      return;
+    }
+
     const isJson = file.name.toLowerCase().endsWith(".json");
     const reader = new FileReader();
 
+    const applyResult = (result: ReturnType<typeof parsePropertiesFromText>) => {
+      setImportRejected(result.rejected);
+      setImportWarnings(result.warnings);
+      setImportStructureNote(
+        result.structure.kind === "portfolio-backup"
+          ? "Copia de seguridad integral de la cartera detectada: se importarán solo los inmuebles del respaldo. El archivo original no se modifica."
+          : null
+      );
+      if (result.error) {
+        setImportError(result.error);
+        setImportPreviewData(null);
+        return;
+      }
+      if (result.properties.length === 0) {
+        setImportError(
+          result.rejected.length > 0
+            ? `Ningún inmueble se puede importar con seguridad: ${result.rejected.length} registro(s) con datos insuficientes (ver detalle). El archivo original no se modifica.`
+            : "No se han encontrado inmuebles con datos válidos en el archivo."
+        );
+        setImportPreviewData(null);
+        return;
+      }
+      setImportPreviewData(result.properties);
+    };
+
     if (isJson) {
-      reader.onload = (e) => {
-        try {
-          const parsed = JSON.parse(e.target?.result as string);
-          
-          let rawArray: any[] | null = null;
-          if (Array.isArray(parsed)) {
-            rawArray = parsed;
-          } else if (parsed && typeof parsed === "object") {
-            if (Array.isArray(parsed.properties)) {
-              rawArray = parsed.properties;
-            } else if (Array.isArray(parsed.inmuebles)) {
-              rawArray = parsed.inmuebles;
-            } else if (Array.isArray(parsed.data?.properties)) {
-              rawArray = parsed.data.properties;
-            } else if (Array.isArray(parsed.portfolio?.properties)) {
-              rawArray = parsed.portfolio.properties;
-            } else if (Array.isArray(parsed.state?.properties)) {
-              rawArray = parsed.state.properties;
-            } else if (Array.isArray(parsed.data)) {
-              rawArray = parsed.data;
-            } else if (Array.isArray(parsed.items)) {
-              rawArray = parsed.items;
-            } else if (parsed.address || parsed["Dirección Completa"] || parsed["Dirección"] || parsed["Direccion"]) {
-              rawArray = [parsed];
-            } else {
-              const candidateKey = Object.keys(parsed).find(k => 
-                Array.isArray(parsed[k]) && parsed[k].length > 0 && 
-                (parsed[k][0]?.address || parsed[k][0]?.["Dirección Completa"] || parsed[k][0]?.cadastralReference || parsed[k][0]?.monthlyRent)
-              );
-              if (candidateKey) {
-                rawArray = parsed[candidateKey];
-              }
-            }
-          }
-
-          if (rawArray && Array.isArray(rawArray)) {
-            const validProps: Property[] = rawArray.map((item: any, idx: number) => ({
-              id: item.id || `prop_imp_${Date.now()}_${idx}`,
-              address: String(item.address || item.Dirección || item["Dirección Completa"] || item.Direccion || "Sin Dirección"),
-              cadastralReference: String(item.cadastralReference || item["Referencia Catastral"] || item.refCatastral || ""),
-              owner: (item.owner === "user2" || item.owner === "joint") ? item.owner : "user1",
-              ownershipPercentageUser1: Number(item.ownershipPercentageUser1 ?? item["% Propietario 1"] ?? 100),
-              ownershipPercentageUser2: Number(item.ownershipPercentageUser2 ?? item["% Propietario 2"] ?? 0),
-              tenantName: String(item.tenantName || item["Inquilino"] || ""),
-              tenantDni: String(item.tenantDni || item["DNI Inquilino"] || ""),
-              monthlyRent: Number(item.monthlyRent ?? item["Renta Mensual (€)"] ?? item["Renta Mensual"] ?? 0),
-              purchasePrice: Number(item.purchasePrice ?? item["Precio Adquisición (€)"] ?? item["Precio Adquisicion"] ?? 0),
-              landValuePercent: Number(item.landValuePercent ?? item["% Suelo Catastral"] ?? 25),
-              amortizationAmount: Number(item.amortizationAmount ?? item["Amortización Anual (€)"] ?? 0),
-              expensesCommunity: Number(item.expensesCommunity ?? item["Gastos Comunidad (€)"] ?? 0),
-              expensesIBI: Number(item.expensesIBI ?? item["Gastos IBI (€)"] ?? 0),
-              expensesInsurance: Number(item.expensesInsurance ?? item["Gastos Seguro (€)"] ?? 0),
-              expensesRepairs: Number(item.expensesRepairs ?? item["Gastos Reparaciones (€)"] ?? 0),
-              registrationDate: String(item.registrationDate || item["Fecha Registro"] || new Date().toLocaleDateString('es-ES')),
-              contract: item.contract,
-              yearlyFinancials: item.yearlyFinancials,
-              documents: item.documents
-            })).filter(p => p.address && p.address !== "Sin Dirección");
-
-            if (validProps.length === 0) {
-              setImportError("No se han encontrado inmuebles con datos válidos en el archivo JSON.");
-              setImportPreviewData(null);
-            } else {
-              setImportPreviewData(validProps);
-            }
-          } else {
-            setImportError("No se ha encontrado un listado de inmuebles en el archivo JSON. Asegúrate de que el archivo exportado contenga los datos de los inmuebles.");
-            setImportPreviewData(null);
-          }
-        } catch (err) {
-          setImportError("Error al leer el archivo JSON de inmuebles. Comprueba que el formato sea correcto.");
-          setImportPreviewData(null);
-        }
-      };
+      reader.onload = (e) => applyResult(parsePropertiesFromText(String(e.target?.result ?? "")));
+      reader.onerror = () => setImportError("No se ha podido leer el archivo seleccionado.");
       reader.readAsText(file);
     } else {
       reader.onload = (e) => {
@@ -869,48 +846,13 @@ export default function Properties({
           const workbook = XLSX.read(data, { type: "array" });
           const sheetName = workbook.SheetNames[0];
           const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-          const validProps: Property[] = rows.map((item: any, idx: number) => {
-            const addr = item["Dirección Completa"] || item["Dirección"] || item["address"] || item["Direccion"] || "Sin Dirección";
-            const ref = item["Referencia Catastral"] || item["cadastralReference"] || item["Ref Catastral"] || "";
-            const ownerVal = item["Titularidad"] || item["Titular"] || item["owner"] || "user1";
-            const rent = item["Renta Mensual (€)"] || item["Renta Mensual"] || item["monthlyRent"] || 0;
-            const price = item["Precio Adquisición (€)"] || item["purchasePrice"] || 0;
-            const land = item["% Suelo Catastral"] || item["landValuePercent"] || 25;
-            const amort = item["Amortización Anual (€)"] || item["amortizationAmount"] || (price * (100 - land) / 100 * 0.03);
-
-            return {
-              id: item["ID Inmueble"] || item["id"] || `prop_imp_${Date.now()}_${idx}`,
-              address: String(addr),
-              cadastralReference: String(ref),
-              owner: ownerVal as any,
-              ownershipPercentageUser1: Number(item["% Propietario 1"] ?? item["ownershipPercentageUser1"] ?? 100),
-              ownershipPercentageUser2: Number(item["% Propietario 2"] ?? item["ownershipPercentageUser2"] ?? 0),
-              tenantName: String(item["Inquilino"] || item["tenantName"] || ""),
-              tenantDni: String(item["DNI Inquilino"] || item["tenantDni"] || ""),
-              monthlyRent: Number(rent) || 0,
-              purchasePrice: Number(price) || 0,
-              landValuePercent: Number(land) || 25,
-              amortizationAmount: Number(amort) || 0,
-              expensesCommunity: Number(item["Gastos Comunidad (€)"] || item["expensesCommunity"] || 0),
-              expensesIBI: Number(item["Gastos IBI (€)"] || item["expensesIBI"] || 0),
-              expensesInsurance: Number(item["Gastos Seguro (€)"] || item["expensesInsurance"] || 0),
-              expensesRepairs: Number(item["Gastos Reparaciones (€)"] || item["expensesRepairs"] || 0),
-              registrationDate: String(item["Fecha Registro"] || item["registrationDate"] || new Date().toLocaleDateString('es-ES'))
-            };
-          }).filter(p => p.address && p.address !== "Sin Dirección");
-
-          if (validProps.length === 0) {
-            setImportError("No se han encontrado filas con direcciones válidas en la hoja de cálculo.");
-            setImportPreviewData(null);
-          } else {
-            setImportPreviewData(validProps);
-          }
+          applyResult(parsePropertiesFromRows(rows));
         } catch (err) {
           setImportError("Error al procesar la hoja de cálculo. Comprueba que sea un archivo Excel (.xlsx, .xls) o CSV válido.");
           setImportPreviewData(null);
         }
       };
+      reader.onerror = () => setImportError("No se ha podido leer el archivo seleccionado.");
       reader.readAsArrayBuffer(file);
     }
   };
@@ -924,11 +866,17 @@ export default function Properties({
         setIsImportOpen(false);
         setImportPreviewData(null);
         setImportSuccessMsg(null);
+        setImportRejected([]);
+        setImportWarnings([]);
+        setImportStructureNote(null);
       }, 1200);
     } else {
       importPreviewData.forEach(p => onAddProperty(p));
       setIsImportOpen(false);
       setImportPreviewData(null);
+      setImportRejected([]);
+      setImportWarnings([]);
+      setImportStructureNote(null);
     }
   };
 
@@ -962,6 +910,9 @@ export default function Properties({
                 setImportPreviewData(null);
                 setImportError(null);
                 setImportSuccessMsg(null);
+                setImportRejected([]);
+                setImportWarnings([]);
+                setImportStructureNote(null);
               }}
               className="inline-flex items-center px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-xl transition-all cursor-pointer text-xs"
               title="Importar inmuebles"
@@ -2689,7 +2640,7 @@ export default function Properties({
                 </div>
                 <div>
                   <h3 className="font-bold text-white text-base">Importar Inmuebles</h3>
-                  <p className="text-xs text-slate-400">Sube un archivo JSON o Excel (.xlsx) de inmuebles</p>
+                  <p className="text-xs text-slate-400">Sube un archivo JSON o hoja de cálculo (.xlsx, .xls, .csv) de inmuebles</p>
                 </div>
               </div>
               <button
@@ -2703,19 +2654,9 @@ export default function Properties({
             <div className="p-6 space-y-5">
               {/* FILE UPLOADER */}
               <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/50 rounded-2xl p-6 text-center transition-colors bg-slate-950/40">
-                <input
-                  type="file"
-                  id="properties-import-file"
-                  accept=".json,.xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleProcessImportFile(file);
-                  }}
-                />
                 <label
                   htmlFor="properties-import-file"
-                  className="cursor-pointer flex flex-col items-center gap-2"
+                  className="relative cursor-pointer flex flex-col items-center gap-2"
                 >
                   <div className="p-3 bg-slate-800 rounded-xl text-amber-400">
                     <FileSpreadsheet className="w-8 h-8" />
@@ -2723,7 +2664,25 @@ export default function Properties({
                   <div>
                     <span className="font-semibold text-white text-sm hover:underline">Haz clic para seleccionar archivo</span>
                     <p className="text-xs text-slate-400 mt-1">Soporta archivos JSON, Excel (.xlsx, .xls) y CSV</p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      El formato se valida después de elegir el archivo. En Android, si tu JSON aparece
+                      como «archivo», selecciónalo igualmente: no debe quedar en gris.
+                    </p>
                   </div>
+                  {/* Input cubriendo la zona (sin display:none): con `hidden` y solo
+                      extensiones en `accept`, el selector de Android deja los .json en
+                      gris o no abre el picker. La validación final es posterior. */}
+                  <input
+                    type="file"
+                    id="properties-import-file"
+                    accept={IMPORT_ACCEPT}
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                    onClick={(e) => { e.currentTarget.value = ""; }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleProcessImportFile(file);
+                    }}
+                  />
                 </label>
               </div>
 
@@ -2740,6 +2699,46 @@ export default function Properties({
                 <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center gap-2">
                   <Check className="w-4 h-4 shrink-0 text-emerald-400" />
                   <span>{importSuccessMsg}</span>
+                </div>
+              )}
+
+              {/* STRUCTURE NOTE (copia integral vs. lista aislada) */}
+              {importStructureNote && (
+                <div className="p-3 bg-slate-800/60 border border-slate-600/50 text-slate-300 rounded-xl text-xs flex items-center gap-2">
+                  <FileCode className="w-4 h-4 shrink-0 text-indigo-400" />
+                  <span>{importStructureNote}</span>
+                </div>
+              )}
+
+              {/* REJECTED RECORDS: nunca se descartan en silencio */}
+              {importRejected.length > 0 && (
+                <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-300 rounded-xl text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                    <span>{importRejected.length} registro(s) no importable(s) con seguridad (no se importarán):</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-red-300/80">
+                    {importRejected.slice(0, 3).map((r) => (
+                      <li key={`${r.index}-${r.key}`}>{r.key}: {r.reason}</li>
+                    ))}
+                    {importRejected.length > 3 && <li>…y {importRejected.length - 3} más.</li>}
+                  </ul>
+                </div>
+              )}
+
+              {/* WARNINGS: campos no informados; no se inventan datos */}
+              {importWarnings.length > 0 && (
+                <div className="p-3 bg-amber-950/30 border border-amber-500/30 text-amber-200 rounded-xl text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span>{importWarnings.length} aviso(s) de datos no informados en el archivo (no se inventan importes, fechas, titulares ni relaciones):</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-amber-200/80">
+                    {importWarnings.slice(0, 3).map((w) => (
+                      <li key={`${w.index}-${w.key}-${w.reason}`}>{w.key}: {w.reason}</li>
+                    ))}
+                    {importWarnings.length > 3 && <li>…y {importWarnings.length - 3} más.</li>}
+                  </ul>
                 </div>
               )}
 
