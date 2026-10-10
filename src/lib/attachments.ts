@@ -2,7 +2,7 @@
 // New attachments are stored in Storage and referenced from Firestore by storagePath only.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
 import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
-import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError } from "./firebase";
+import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError } from "./firebase";
 import {
   AttachmentFolder,
   attachmentStoragePath,
@@ -47,6 +47,18 @@ async function ensureSignedIn(): Promise<void> {
     }
     const code = err?.code || "";
     const detail = describeAuthError(err);
+    if (isAdministrativeAuthError(err)) {
+      // Rechazo administrativo del servicio (p. ej. auth/admin-restricted-operation):
+      // NO es un fallo transitorio de red y ningún reintento de cliente puede resolverlo.
+      // Se comunica como bloqueo de configuración del proyecto Firebase, sin confundirlo
+      // con problemas de conexión ni agotar el tiempo de espera.
+      throw new AttachmentError(
+        `Firebase Auth ha rechazado la sesión por una restricción administrativa del proyecto Firebase ` +
+          `(${code}: ${detail}). El archivo no se ha subido. Este bloqueo no puede resolverse desde la ` +
+          `aplicación: requiere revisar la configuración de Authentication/Identity Platform del proyecto ` +
+          `en la consola de Firebase.`
+      );
+    }
     const msg = code
       ? `No se ha podido iniciar la sesión anónima de Firebase (${code}: ${detail}); el archivo no se ha subido.`
       : `No se ha podido iniciar la sesión anónima de Firebase (${detail}); el archivo no se ha subido.`;

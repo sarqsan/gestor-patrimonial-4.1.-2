@@ -1,0 +1,148 @@
+# Incidencia: `auth/admin-restricted-operation` en Firebase Auth (producción)
+
+Fecha del informe: 2026-10-10
+Repositorio: `sarqsan/gestor-patrimonial-4.1.-2`
+Rama de trabajo: `arena/17d0d46b-gestor-patrimonial-4-1-2` (basada exactamente en el commit desplegado)
+
+## 1. Verificación del código desplegado (solo lectura)
+
+- `git rev-parse HEAD` = `d5bfcc6d0686b453cf4217f54d9e463ba2965aa0` → **coincide con el commit
+  desplegado declarado**. La rama de trabajo parte de ese mismo commit; no hay deriva de código.
+- Archivos inspeccionados: `src/lib/firebase.ts`, `src/lib/attachments.ts`,
+  `src/lib/movementService.ts`, `firebase-applet-config.json`, `firestore.rules`,
+  `storage.rules`, `src/App.tsx`, `src/components/AuthScreen.tsx`, `server/apiApp.ts`.
+
+### Cómo se autentica hoy la aplicación
+
+1. **Usuario de la aplicación**: pantalla local de usuario/contraseña (`AuthScreen`), con cuentas
+   guardadas en `localStorage`. El nombre de usuario (p. ej. `rentasync`) es la clave de todos los
+   datos: `users/{usuario}/data/portfolio`, `users/{usuario}/expenses/{id}` (Firestore) y
+   `users/{usuario}/attachments/**`, `users/{usuario}/backups/**` (Storage).
+2. **Sesión Firebase**: exclusivamente `signInAnonymously(auth)` (`src/lib/firebase.ts`,
+   `ensureFirebaseAuth`). Su única función es satisfacer `request.auth != null` en las reglas de
+   Firestore/Storage y aportar el `ownerUid` de los movimientos. No existe ningún otro flujo de
+   Firebase Auth en el código (ni correo/contraseña, ni Google, ni tokens personalizados, ni
+   credenciales de servicio en cliente o servidor).
+
+### Causa demostrada del error
+
+- El SDK de Firebase v12 instalado en el proyecto traduce el rechazo `ADMIN_ONLY_OPERATION` del
+  **backend de Identity Platform** al código `auth/admin-restricted-operation` con el mensaje
+  *"This operation is restricted to administrators only."* (verificado en
+  `node_modules/@firebase/auth/dist/node/totp-D1uGng8T.js`).
+- Es decir: la llamada `signInAnonymously` llega al servicio y el servicio la **rechaza por una
+  restricción administrativa de configuración del proyecto Firebase** `startup-sanctuary-sln7n`.
+- No es un fallo transitorio de red: esos fallos llegarían como `auth/network-request-failed`
+  (error de `fetch`), y el cliente ya los distingue (ver §5).
+- No es un error corregible en el cliente: ningún cambio de código de la aplicación puede levantar
+  una restricción impuesta por la configuración del proyecto en el servicio.
+- Consecuencia observada: `ensureSignedIn()` (`src/lib/attachments.ts`) aborta con
+  `AttachmentError` **antes** de intentar `uploadBytes`; por eso "la subida del archivo se cancela".
+
+**Límite de la evidencia**: el ajuste exacto que impone la restricción solo puede leerse en la
+consola del proyecto (Firebase Authentication / Identity Platform). Este entorno no tiene acceso de
+red a las APIs de Google ni credenciales de administración del proyecto, por lo que no se atribuye
+el rechazo a un ajuste concreto sin evidencia; se documenta el hecho demostrado (rechazo
+`ADMIN_ONLY_OPERATION` del servicio) y el cambio imprescindible (§4).
+
+## 2. Alternativas de autenticación evaluadas (en el orden exigido)
+
+1. **¿Existe un mecanismo ya disponible y compatible?** No.
+   - `firebase-applet-config.json` incluye un `oAuthClientId`, pero no hay ningún flujo de acceso
+     con Google en la aplicación. Implantarlo exigiría re-clavear los datos (hoy por nombre de
+     usuario local) hacia el UID/email del token Google: eso **modificaría el modelo de
+     propietarios y reasignaría movimientos**, expresamente prohibido en la incidencia. Además,
+     `firestore.rules` (`isOwner`) no autorizaría a un token Google sobre `users/{usuario}` sin esa
+     reasignación.
+   - Correo/contraseña de Firebase: no hay flujo de alta en la app, las cuentas actuales son locales
+     y la operación de alta (`signUp`) es precisamente del tipo que la restricción administrativa
+     bloquea; además requeriría cambiar el modelo de usuarios. Descartado por los mismos motivos.
+   - Tokens personalizados vía Admin SDK: no existen credenciales de servicio en el repositorio y
+     embeber claves privilegiadas en el cliente está expresamente prohibido.
+2. **Cambio de configuración/infraestructura imprescindible**: levantar la restricción
+   administrativa que impide la sesión anónima en el proyecto `startup-sanctuary-sln7n` (detalle en
+   §4). Es el único camino compatible con el modelo actual de usuarios y con los datos existentes.
+3. **¿Puede ejecutarse ese cambio desde este entorno?** No. Ver §4 → **bloqueo real declarado**.
+
+## 3. Cambios de código aplicados (alcance limitado; NO resuelven el bloqueo)
+
+Siguiendo la instrucción de no introducir cambios de cliente que no pueden resolver la incidencia,
+los cambios aplicados son únicamente los imprescindibles para **reproducir, clasificar y comunicar
+honestamente** el rechazo administrativo:
+
+| Archivo | Cambio | Motivo |
+| --- | --- | --- |
+| `src/lib/firebase.ts` | Punto de inyección `__setSignInDriverForTests` alrededor de `signInAnonymously` (comportamiento real idéntico). | Reproducir el rechazo del servicio en pruebas sin red ni proyecto real. |
+| `src/lib/firebase.ts` | Clasificación `classifyAuthError` / `isAdministrativeAuthError` / `isTransientNetworkAuthError` y conjuntos de códigos. | Que el cliente no confunda el rechazo administrativo con fallo transitorio de red. |
+| `src/lib/firebase.ts` | Mensaje de `describeAuthError` para `auth/admin-restricted-operation`: identifica la restricción administrativa y su vía de resolución (consola). | Comunicación honesta al operador. |
+| `src/lib/attachments.ts` | Rama específica en `ensureSignedIn()` para rechazos administrativos: mensaje con el código del servicio, sin lenguaje de conectividad ni de timeout. | La subida se cancela comunicando el bloqueo real. |
+| `src/lib/adminRestrictedOperation.test.ts` + registro en `package.json` | Pruebas nuevas (ver §5). | Verificación obligatoria. |
+
+**No se ha tocado**: `firestore.rules`, `storage.rules`, `firebase-applet-config.json` (proyecto y
+base de datos intactos), el modelo de propietarios/`ownerUid`, los movimientos históricos ni la
+compatibilidad con comprobantes históricos (`receiptUrl`/data-URL antiguos).
+
+## 4. BLOQUEO REAL: cambio administrativo no ejecutable desde este entorno
+
+La resolución exige un cambio en la configuración del proyecto Firebase `startup-sanctuary-sln7n`
+(propietario: la cuenta administradora del proyecto), que este entorno **no puede ejecutar**:
+
+1. Consola de Firebase → proyecto `startup-sanctuary-sln7n` → **Authentication → Sign-in method**:
+   verificar que el proveedor **Anonymous** está habilitado y que no hay restricciones de tipo
+   "solo administradores" sobre el inicio de sesión.
+2. Si el proyecto se gestiona con **Identity Platform** (Google Cloud → Identity Platform →
+   Settings): permitir el acceso anónimo y revisar funciones de bloqueo o políticas que rechacen la
+   operación (el código `ADMIN_ONLY_OPERATION` indica restricción a nivel de proyecto).
+3. Revisar restricciones de la API key de Identity Toolkit si las hubiera.
+
+Por qué no es automatizable desde aquí:
+
+- No hay en el repositorio credenciales de administración de Firebase/GCP (ni service account, ni
+  `FIREBASE_TOKEN`, ni `firebase.json` con proyecto configurado).
+- Este entorno de trabajo no tiene ruta de red hacia `*.googleapis.com` / consola de Firebase.
+- Ejecutarlo requiere identidad humana con rol propietario/editor del proyecto Google Cloud.
+
+Hasta que ese cambio se aplique, **ningún cambio adicional de cliente puede resolver la
+incidencia**, y por mandato expreso no se seguirán introduciendo.
+
+## 5. Pruebas ejecutadas
+
+- `src/lib/adminRestrictedOperation.test.ts` (nuevo, 11 comprobaciones):
+  - **R1** reproduce el rechazo con el código y mensaje exactos del servicio
+    (`auth/admin-restricted-operation` / *"restricted to administrators only"*) y verifica que se
+    propaga sin enmascararse y sin bloqueo permanente.
+  - **R2** verifica una sola petición en vuelo bajo llamadas concurrentes (sin tormentas).
+  - **R3/R4** demuestran que el cliente **no clasifica ni comunica** el rechazo como fallo
+    transitorio de red (contraste incluido con `auth/network-request-failed` y `auth/timeout`).
+  - **R5** demuestra que el error llega de inmediato (no por el timeout de 15 s reservado a red) y
+    con lenguaje de restricción administrativa.
+  - **R6** demuestra que `uploadAttachment` se cancela **antes** de intentar la subida a Storage.
+  - **R8** demuestra que el mecanismo de sesión funciona si el servicio autorizara la operación.
+- Suite completa: `npm test` → **209 pruebas, 0 fallos** (incluye las 121 previas sin regresión).
+- `npm run lint` (`tsc --noEmit`) sin errores; `npm run build` correcto.
+
+**Alcance de estas pruebas**: son simuladas (el entorno no puede alcanzar el servicio real).
+Demuestran el comportamiento del cliente ante el rechazo, **no** certifican la resolución de la
+incidencia en producción.
+
+## 6. Verificación pendiente tras el desbloqueo (entorno controlado)
+
+Cuando la administración del proyecto levante la restricción, verificar **antes de declarar
+resuelto**:
+
+1. `signInAnonymously` obtiene sesión real (`auth.currentUser.isAnonymous === true`).
+2. Escritura/lectura autorizada en Firestore: guardar un movimiento de prueba en
+   `users/{usuario}/expenses/{id}` y releerlo.
+3. Autorización en Storage: subir un archivo de prueba (PNG/PDF < 10 MB) a
+   `users/{usuario}/attachments/expenses/...` y recuperarlo (`getAttachmentBytes` / descarga).
+4. Confirmar que los gastos y comprobantes históricos siguen listándose y descargándose igual.
+5. No se debe realizar ninguna escritura real en producción sin autorización expresa.
+
+## 7. Datos y seguridad: garantías mantenidas
+
+- Proyecto Firebase e identificador de base de datos: sin cambios.
+- Movimientos históricos: sin eliminar ni migrar; modelo de propietarios intacto.
+- `firestore.rules` y `storage.rules`: sin relajar; sin acceso público a gastos o adjuntos.
+- Compatibilidad con comprobantes históricos (data-URL): intacta.
+- Sin credenciales inventadas, cuentas compartidas, tokens falsificados ni claves privilegiadas en
+  el cliente.
