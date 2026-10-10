@@ -12,8 +12,17 @@ import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, SaveStatus
 import { checkPortfolioWrite, legacyDataUrlSet } from "./lib/portfolioGuard";
 import { mergeMigratedReferences } from "./lib/portfolioMigrationRun";
 import { portfolioBody } from "./lib/portfolioPayload";
-import { extractYearFromDate } from "./lib/dateUtils";
+import { extractYearFromDate, normalizeDateToIso } from "./lib/dateUtils";
 import { mergeExpensesOnHydration, mergePropertiesOnHydration } from "./lib/portfolioHydration";
+import { 
+  saveMovement, 
+  deleteMovement, 
+  batchSaveMovements, 
+  subscribeMovements, 
+  reconcileMovements, 
+  migrateLegacyPortfolioExpenses, 
+  movementSignature 
+} from "./lib/movementService";
 import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
 import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
 import { 
@@ -343,7 +352,7 @@ export default function App() {
         });
       });
 
-    // Subscribe to real-time updates
+    // Subscribe to real-time updates for portfolio master document
     const unsubscribe = onSnapshot(
       userDocRef,
       (docSnap) => {
@@ -378,7 +387,26 @@ export default function App() {
       }
     );
 
-    return () => unsubscribe();
+    // Subscribe to movements subcollection (users/{currentUser}/expenses)
+    const unsubscribeMovements = subscribeMovements(
+      state.currentUser,
+      (remoteMovements) => {
+        if (remoteMovements.length > 0) {
+          setState((prev) => ({
+            ...prev,
+            expenses: reconcileMovements(prev.expenses, remoteMovements),
+          }));
+        }
+      },
+      (err) => {
+        console.warn("Subcolección de gastos no disponible en tiempo real:", err);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      unsubscribeMovements();
+    };
   }, [state.currentUser, state.isAuthenticated]);
 
   // Toast notifier
@@ -574,19 +602,106 @@ export default function App() {
     triggerNotification("Historial de sincronización purgado");
   };
 
-  // ADD EXPENSE
+  // ADD EXPENSE OR INCOME
   const handleAddExpense = (newExpense: PropertyExpense) => {
+    const expenseWithStatus: PropertyExpense = {
+      ...newExpense,
+      status: "pending",
+      date: normalizeDateToIso(newExpense.date) || newExpense.date,
+      type: newExpense.type || (newExpense.category === "rent" ? "ingreso" : "gasto"),
+    };
+
     updateState((prev) => ({
       ...prev,
-      expenses: [...(prev.expenses || []), newExpense]
+      expenses: [...(prev.expenses || []).filter((e) => e.id !== newExpense.id), expenseWithStatus]
     }));
+
+    if (state.currentUser) {
+      saveMovement(state.currentUser, expenseWithStatus)
+        .then((res) => {
+          if (res.ok) {
+            updateState((prev) => ({
+              ...prev,
+              expenses: (prev.expenses || []).map((e) =>
+                e.id === newExpense.id ? { ...e, status: "synced" } : e
+              ),
+            }));
+            triggerNotification(`✓ Guardado en Firebase: ${newExpense.amount}€ (${newExpense.category})`);
+          } else {
+            updateState((prev) => ({
+              ...prev,
+              expenses: (prev.expenses || []).map((e) =>
+                e.id === newExpense.id ? { ...e, status: "error" } : e
+              ),
+            }));
+            triggerNotification(`⚠ Error al guardar en Firebase: ${res.error}`);
+          }
+        })
+        .catch((err) => {
+          updateState((prev) => ({
+            ...prev,
+            expenses: (prev.expenses || []).map((e) =>
+              e.id === newExpense.id ? { ...e, status: "error" } : e
+            ),
+          }));
+          triggerNotification(`⚠ Error de conexión: ${err.message || String(err)}`);
+        });
+    }
 
     const prop = state.properties.find(p => p.id === newExpense.propertyId);
     addSyncEvent(
       "Gestión de Gastos",
       "Simulador de Impuestos (Modelo 100)",
-      `Gasto registrado: ${newExpense.amount}€`,
-      `Registrado gasto de ${newExpense.amount}€ en concepto de "${newExpense.category}" para el inmueble en ${prop ? prop.address.split(",")[0] : "Desconocido"}. Sincronizado para deducción del IRPF.`
+      `${newExpense.type === "ingreso" ? "Ingreso" : "Gasto"} registrado: ${newExpense.amount}€`,
+      `Registrado apunte de ${newExpense.amount}€ en concepto de "${newExpense.category}" para el inmueble en ${prop ? prop.address.split(",")[0] : "Desconocido"}. Sincronizado para deducción del IRPF.`
+    );
+  };
+
+  // EDIT EXPENSE OR INCOME
+  const handleEditExpense = (updatedExpense: PropertyExpense) => {
+    const withStatus: PropertyExpense = {
+      ...updatedExpense,
+      status: "pending",
+      date: normalizeDateToIso(updatedExpense.date) || updatedExpense.date,
+      type: updatedExpense.type || (updatedExpense.category === "rent" ? "ingreso" : "gasto"),
+    };
+
+    updateState((prev) => ({
+      ...prev,
+      expenses: (prev.expenses || []).map((e) => (e.id === updatedExpense.id ? withStatus : e)),
+    }));
+
+    if (state.currentUser) {
+      saveMovement(state.currentUser, withStatus)
+        .then((res) => {
+          if (res.ok) {
+            updateState((prev) => ({
+              ...prev,
+              expenses: (prev.expenses || []).map((e) =>
+                e.id === updatedExpense.id ? { ...e, status: "synced" } : e
+              ),
+            }));
+            triggerNotification(`✓ Modificación guardada en Firebase: ${updatedExpense.amount}€`);
+          } else {
+            updateState((prev) => ({
+              ...prev,
+              expenses: (prev.expenses || []).map((e) =>
+                e.id === updatedExpense.id ? { ...e, status: "error" } : e
+              ),
+            }));
+            triggerNotification(`⚠ Error al actualizar en Firebase: ${res.error}`);
+          }
+        })
+        .catch((err) => {
+          triggerNotification(`⚠ Error de conexión: ${err.message || String(err)}`);
+        });
+    }
+
+    addSyncEvent(
+      "Gestión de Gastos",
+      "Libro Diario Unificado",
+      `Movimiento editado: ${updatedExpense.amount}€`,
+      `Actualizada operación ${updatedExpense.id} en ${updatedExpense.category}.`
     );
   };
 
@@ -596,6 +711,15 @@ export default function App() {
       ...prev,
       expenses: (prev.expenses || []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
     }));
+
+    if (state.currentUser) {
+      const exp = (state.expenses || []).find((e) => e.id === id);
+      if (exp) {
+        saveMovement(state.currentUser, { ...exp, ...patch }).catch((err) => {
+          console.warn("Error persistiendo referencia de comprobante:", err);
+        });
+      }
+    }
   };
 
   // DELETE EXPENSE
@@ -603,10 +727,16 @@ export default function App() {
     const expense = (state.expenses || []).find(e => e.id === id);
     if (!expense) return;
 
+    if (state.currentUser) {
+      deleteMovement(state.currentUser, id).catch((err) => {
+        console.error("Error eliminando movimiento en Firestore:", err);
+      });
+    }
+
     updateState((prev) => {
       const updatedExpenses = (prev.expenses || []).filter((e) => e.id !== id);
       const year = prev.currentYear || 2026;
-      const expenseYear = parseInt(expense.date.split("-")[0] || "0");
+      const expenseYear = extractYearFromDate(expense.date) || 0;
 
       let updatedProperties = prev.properties;
       if (expenseYear === year) {
@@ -617,7 +747,7 @@ export default function App() {
                 e.propertyId === p.id &&
                 e.category === expense.category &&
                 e.type === "gasto" &&
-                parseInt(e.date.split("-")[0] || "0") === year
+                extractYearFromDate(e.date) === year
             );
 
             if (!hasMoreOfSameCategory) {
@@ -660,16 +790,41 @@ export default function App() {
     updateState((prev) => {
       let finalExpenses: PropertyExpense[];
       if (mode === 'replace') {
-        finalExpenses = newExpenses;
+        finalExpenses = newExpenses.map(e => ({ ...e, status: "pending" as const }));
       } else {
+        // Conciliación idempotente por ID y firma contable: NUNCA duplicar
         const existingIds = new Set((prev.expenses || []).map(e => e.id));
-        const deduplicatedNew = newExpenses.map(e => {
-          if (existingIds.has(e.id)) {
-            return { ...e, id: `exp_${Date.now()}_${Math.random().toString(36).substr(2, 5)}` };
+        const existingSigs = new Set((prev.expenses || []).map(movementSignature));
+        const deduplicatedNew: PropertyExpense[] = [];
+
+        for (const e of newExpenses) {
+          const sig = movementSignature(e);
+          if (!existingIds.has(e.id) && !existingSigs.has(sig)) {
+            deduplicatedNew.push({ ...e, status: "pending" });
+            existingIds.add(e.id);
+            existingSigs.add(sig);
           }
-          return e;
-        });
+        }
         finalExpenses = [...(prev.expenses || []), ...deduplicatedNew];
+      }
+
+      // Guardar lote en Firestore subcolección
+      if (state.currentUser && finalExpenses.length > 0) {
+        batchSaveMovements(state.currentUser, finalExpenses)
+          .then((res) => {
+            if (res.ok) {
+              updateState((p) => ({
+                ...p,
+                expenses: (p.expenses || []).map((e) => ({ ...e, status: "synced" })),
+              }));
+              triggerNotification(`✓ ${res.savedCount} movimientos persistidos en Firebase`);
+            } else {
+              triggerNotification(`⚠ Importación guardada parcialmente: ${res.errors.join(", ")}`);
+            }
+          })
+          .catch((err) => {
+            console.error("Error en batchSaveMovements:", err);
+          });
       }
 
       return {
@@ -1142,6 +1297,7 @@ export default function App() {
             properties={state.properties} 
             expenses={state.expenses || []} 
             onAddExpense={handleAddExpense}
+            onEditExpense={handleEditExpense}
             onDeleteExpense={handleDeleteExpense}
             onImportExpenses={handleImportExpenses}
             onUpdateExpenseReceipt={handleUpdateExpenseReceipt}

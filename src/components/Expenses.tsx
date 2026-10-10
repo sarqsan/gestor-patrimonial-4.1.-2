@@ -49,13 +49,16 @@ import {
   Image as ImageIcon,
   FolderArchive,
   Archive,
-  Loader2
+  Loader2,
+  Pencil,
+  Clock
 } from "lucide-react";
 
 interface ExpensesProps {
   properties: Property[];
   expenses: PropertyExpense[];
   onAddExpense: (newExpense: PropertyExpense) => void;
+  onEditExpense?: (updatedExpense: PropertyExpense) => void;
   onDeleteExpense: (id: string) => void;
   onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
   onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void;
@@ -76,6 +79,7 @@ export default function Expenses({
   properties,
   expenses = [],
   onAddExpense,
+  onEditExpense,
   onDeleteExpense,
   onImportExpenses,
   onUpdateExpenseReceipt,
@@ -85,6 +89,7 @@ export default function Expenses({
 }: ExpensesProps) {
   const [activeSubTab, setActiveSubTab] = useState<"ledger" | "amortization" | "analysis">("ledger");
   const [isAdding, setIsAdding] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<PropertyExpense | null>(null);
   const [filterProperty, setFilterProperty] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterType, setFilterType] = useState<"all" | "gasto" | "ingreso">("all");
@@ -480,6 +485,7 @@ export default function Expenses({
   };
 
   const resetForm = () => {
+    setEditingExpense(null);
     setPropertyId(properties[0]?.id || "");
     setOpType("gasto");
     setCategory("repairs");
@@ -500,6 +506,20 @@ export default function Expenses({
       setError("Debes registrar al menos un inmueble antes de registrar transacciones.");
     }
     resetForm();
+    setIsAdding(true);
+  };
+
+  const handleStartEdit = (exp: PropertyExpense) => {
+    resetForm();
+    setEditingExpense(exp);
+    setPropertyId(exp.propertyId);
+    setOpType(exp.type || (exp.category === "rent" ? "ingreso" : "gasto"));
+    setCategory(exp.category);
+    setAmount(exp.amount.toString());
+    setDate(exp.date);
+    setDescription(exp.description || "");
+    if (exp.receiptPath) setReceiptUrl(exp.receiptPath);
+    if (exp.receiptName) setReceiptName(exp.receiptName);
     setIsAdding(true);
   };
 
@@ -552,18 +572,38 @@ export default function Expenses({
       setIsSavingExpense(false);
     }
 
-    const newExpense: PropertyExpense = {
-      id: expenseId,
-      propertyId,
-      category: finalCategory,
-      type: opType,
-      amount: parsedAmount,
-      date: normalizeDateToIso(date) || date,
-      description: description.trim() || undefined,
-      ...receiptFields,
-    };
+    if (editingExpense) {
+      const updatedExpense: PropertyExpense = {
+        ...editingExpense,
+        propertyId,
+        category: finalCategory,
+        type: opType,
+        amount: parsedAmount,
+        date: normalizeDateToIso(date) || date,
+        description: description.trim() || undefined,
+        ...receiptFields,
+      };
 
-    onAddExpense(newExpense);
+      if (onEditExpense) {
+        onEditExpense(updatedExpense);
+      } else {
+        onAddExpense(updatedExpense);
+      }
+    } else {
+      const newExpense: PropertyExpense = {
+        id: expenseId,
+        propertyId,
+        category: finalCategory,
+        type: opType,
+        amount: parsedAmount,
+        date: normalizeDateToIso(date) || date,
+        description: description.trim() || undefined,
+        ...receiptFields,
+      };
+
+      onAddExpense(newExpense);
+    }
+
     setIsAdding(false);
     resetForm();
   };
@@ -799,7 +839,7 @@ export default function Expenses({
         <form onSubmit={handleSubmit} className="bg-slate-900/40 border border-slate-700/50 rounded-2xl p-6 shadow-2xl animate-slide-in text-left">
           <h3 className="text-md font-bold text-white flex items-center mb-6">
             <Receipt className="w-5 h-5 text-indigo-400 mr-2" />
-            <span>Registrar Nueva Operación Contable</span>
+            <span>{editingExpense ? `Editar Operación Contable (${editingExpense.id})` : "Registrar Nueva Operación Contable"}</span>
           </h3>
 
           {error && (
@@ -1032,7 +1072,7 @@ export default function Expenses({
               disabled={isSavingExpense}
               className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-wait text-white font-semibold rounded-xl text-xs transition-all cursor-pointer shadow-lg shadow-indigo-600/15"
             >
-              {isSavingExpense ? "Subiendo comprobante…" : "Guardar Operación"}
+              {isSavingExpense ? "Subiendo comprobante…" : editingExpense ? "Guardar Cambios" : "Guardar Operación"}
             </button>
           </div>
         </form>
@@ -1170,7 +1210,19 @@ export default function Expenses({
                             </span>
                           </td>
                           <td className="py-3.5 px-3 text-slate-400 italic font-normal max-w-xs truncate">
-                            {exp.description || "-"}
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate">{exp.description || "-"}</span>
+                              {exp.status === "pending" && (
+                                <span className="shrink-0 text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono font-medium flex items-center gap-1">
+                                  <Clock className="w-2.5 h-2.5 animate-spin" /> Guardando…
+                                </span>
+                              )}
+                              {exp.status === "error" && (
+                                <span className="shrink-0 text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1.5 py-0.2 rounded font-mono font-medium flex items-center gap-1">
+                                  <AlertCircle className="w-2.5 h-2.5" /> Error
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-3.5 px-3 text-center">
                             {hasReceipt(exp) ? (
@@ -1235,14 +1287,24 @@ export default function Expenses({
                                 </button>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => setDeleteConfirmId(exp.id)}
-                                className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors cursor-pointer"
-                                title="Eliminar Registro"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEdit(exp)}
+                                  className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-indigo-950/20 rounded-lg transition-colors cursor-pointer"
+                                  title="Editar Registro"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmId(exp.id)}
+                                  className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors cursor-pointer"
+                                  title="Eliminar Registro"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
