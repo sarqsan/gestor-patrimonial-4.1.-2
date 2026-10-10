@@ -1,51 +1,51 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AppState } from "../types";
+import { buildInventory, formatBytes, inventoryReport, calculatePortfolioSize } from "../lib/portfolioMigration";
 import {
-  buildInventory,
-  formatBytes,
-  inventoryReport,
-  runFullMigration,
-  MigrationInventory,
-  MigrationProgress,
-  StorageAdapter,
-  calculatePortfolioSize,
-} from "../lib/portfolioMigration";
-import { createRealStorageAdapter, createRealFirestoreAdapter } from "../lib/firebaseMigration";
-import { AlertTriangle, CheckCircle, Database, HardDrive, Loader2, ShieldCheck, Upload } from "lucide-react";
+  canStartMigration,
+  MigrationOutcome,
+  MigrationRecord,
+  restorePortfolioFromBackup,
+  runPortfolioAttachmentMigration,
+} from "../lib/portfolioMigrationRun";
+import { createFirebaseMigrationStorage, createFirebaseMigrationStore } from "../lib/firebaseMigration";
+import { AlertTriangle, CheckCircle, Database, HardDrive, Loader2, RotateCcw, ShieldCheck, Upload } from "lucide-react";
 
 interface Props {
   state: AppState;
   currentUser: string;
+  /** Tras una migración o restauración correcta, la pantalla adopta el documento de la nube. */
+  onApplied: (raw: Record<string, unknown>, mode: "migrated" | "restored") => void;
 }
 
-export default function MigrationPanel({ state, currentUser }: Props) {
-  const [inventory, setInventory] = useState<MigrationInventory | null>(null);
-  const [progress, setProgress] = useState<MigrationProgress | null>(null);
-  const [resultMsg, setResultMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
-  const [showConfirm, setShowConfirm] = useState(false);
-
+export default function MigrationPanel({ state, currentUser, onApplied }: Props) {
+  // El diagnóstico se calcula en vivo desde el estado de la app (no depende de un clic previo).
+  const inventory = useMemo(() => buildInventory(state, currentUser), [state, currentUser]);
   const sizeInfo = calculatePortfolioSize(state);
 
-  const handleDiagnose = () => {
-    setErrorMsg(null);
-    setResultMsg(null);
-    try {
-      const inv = buildInventory(state, currentUser);
-      setInventory(inv);
-      setResultMsg(`Diagnóstico completado. ${inv.legacyCount} adjuntos históricos detectados.`);
-    } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : String(e));
-    }
-  };
+  const [isRunning, setIsRunning] = useState(false);
+  const [liveStep, setLiveStep] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<MigrationOutcome | null>(null);
+  const [resultMsg, setResultMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [confirmText, setConfirmText] = useState("");
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [record, setRecord] = useState<MigrationRecord | null>(null);
+  const [restoreConfirm, setRestoreConfirm] = useState(false);
+  const [restoreText, setRestoreText] = useState("");
+
+  const gate = canStartMigration({ legacyCount: inventory.legacyCount, running: isRunning });
+
+  useEffect(() => {
+    let cancelled = false;
+    createFirebaseMigrationStore()
+      .readMigrationRecord(currentUser)
+      .then((r) => { if (!cancelled) setRecord(r); })
+      .catch(() => { /* sin registro previo o sin conexión: no bloquea el panel */ });
+    return () => { cancelled = true; };
+  }, [currentUser]);
 
   const handleStartMigration = async () => {
-    if (!inventory) {
-      setErrorMsg("Ejecuta primero el diagnóstico.");
-      return;
-    }
     if (confirmText !== `MIGRAR ${currentUser}`) {
       setErrorMsg(`Para confirmar, escribe exactamente: MIGRAR ${currentUser}`);
       return;
@@ -53,50 +53,66 @@ export default function MigrationPanel({ state, currentUser }: Props) {
     setIsRunning(true);
     setErrorMsg(null);
     setResultMsg(null);
-    setProgress({ phase: "inventory", total: inventory.legacyCount, uploaded: 0, verified: 0, errors: [], pending: inventory.attachments });
-
+    setOutcome(null);
+    setLiveStep("Creando copia de seguridad verificada…");
     try {
-      const storageAdapter: StorageAdapter = createRealStorageAdapter();
-      const firestoreAdapter = createRealFirestoreAdapter();
-
-      // 1. Leer portfolio actual con updatedAt para detección concurrente
-      const current = await firestoreAdapter.getPortfolio(currentUser);
-      if (!current) {
-        throw new Error("No se encontró la cartera en Firestore.");
-      }
-      const expectedUpdatedAt = current.updatedAt;
-
-      // 2. Ejecutar migración (subida + verificación + reescritura en memoria)
-      const migrationResult = await runFullMigration(current.portfolio, currentUser, storageAdapter, {
-        onProgress: setProgress,
+      const result = await runPortfolioAttachmentMigration({
+        userId: currentUser,
+        working: state,
+        storage: createFirebaseMigrationStorage(),
+        store: createFirebaseMigrationStore(),
       });
-
-      if (!migrationResult.success || !migrationResult.migratedPortfolio) {
-        throw new Error(
-          `Migración fallida: ${migrationResult.errors.map((e) => `${e.attachmentId}: ${e.error}`).join("; ")}`
+      setOutcome(result);
+      if (result.status === "completed" && result.migratedRaw) {
+        onApplied(result.migratedRaw, "migrated");
+        setResultMsg(
+          `Migración completada y verificada. ${result.attachments.length} adjunto(s) en Storage. ` +
+            `Copia de seguridad: ${result.backupId}. Tamaño de la cartera: ${formatBytes(result.finalBytes || 0)} ` +
+            `(antes ${formatBytes(result.initialBytes)}). No se ha eliminado ningún dato original.`
+        );
+        setRecord(await createFirebaseMigrationStore().readMigrationRecord(currentUser).catch(() => null));
+      } else if (result.status === "nothing-to-migrate") {
+        setResultMsg("No hay adjuntos Base64 que migrar. La cartera ya está migrada.");
+      } else {
+        setErrorMsg(
+          `${result.status === "rolled-back" ? "Migración revertida" : "Migración no completada"}: ${result.error ?? "error desconocido"}`
         );
       }
-
-      // 3. Crear backup antes de escribir
-      const backupId = await firestoreAdapter.createBackup!(currentUser, current.portfolio);
-
-      // 4. Escribir portfolio migrado con protección concurrente
-      const { updatedAt } = await firestoreAdapter.setPortfolio(
-        currentUser,
-        migrationResult.migratedPortfolio,
-        expectedUpdatedAt
-      );
-
-      setResultMsg(
-        `Migración completada. Backup: ${backupId}. Nuevo tamaño: ${formatBytes(migrationResult.finalBytes || 0)} (antes ${formatBytes(inventory.initialBytes)}). Nuevo updatedAt: ${updatedAt}`
-      );
-      setProgress({ phase: "done", total: inventory.legacyCount, uploaded: inventory.legacyCount, verified: inventory.legacyCount, errors: [], pending: [] });
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : String(e));
     } finally {
       setIsRunning(false);
+      setLiveStep(null);
       setShowConfirm(false);
       setConfirmText("");
+    }
+  };
+
+  const handleRestore = async () => {
+    const backupId = record?.backupId;
+    if (!backupId) return;
+    if (restoreText !== `RESTAURAR ${currentUser}`) {
+      setErrorMsg(`Para restaurar, escribe exactamente: RESTAURAR ${currentUser}`);
+      return;
+    }
+    setIsRunning(true);
+    setErrorMsg(null);
+    setResultMsg(null);
+    try {
+      const restored = await restorePortfolioFromBackup({
+        userId: currentUser,
+        backupId,
+        storage: createFirebaseMigrationStorage(),
+        store: createFirebaseMigrationStore(),
+      });
+      onApplied(restored.raw, "restored");
+      setResultMsg(`Cartera restaurada desde la copia ${backupId}. La copia sigue disponible.`);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsRunning(false);
+      setRestoreConfirm(false);
+      setRestoreText("");
     }
   };
 
@@ -109,7 +125,8 @@ export default function MigrationPanel({ state, currentUser }: Props) {
         <div>
           <h3 className="font-bold text-white text-sm">Migración segura de adjuntos históricos</h3>
           <p className="text-xs text-slate-400">
-            Extrae los comprobantes y documentos Base64 históricos a Firebase Storage. No se ejecuta automáticamente.
+            Mueve los comprobantes y documentos Base64 históricos a Firebase Storage y deja solo referencias en la cartera.
+            Requiere confirmación explícita.
           </p>
         </div>
       </div>
@@ -129,29 +146,33 @@ export default function MigrationPanel({ state, currentUser }: Props) {
         </div>
         <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3">
           <span className="text-[10px] text-slate-500 uppercase font-mono block">Estado</span>
-          <span className="text-sm font-bold text-slate-200">{isRunning ? "Migrando…" : inventory ? `${inventory.legacyCount} históricos` : "Sin diagnóstico"}</span>
+          <span className="text-sm font-bold text-slate-200">
+            {isRunning ? "Migrando…" : `${inventory.legacyCount} adjunto(s) Base64 históricos`}
+          </span>
         </div>
       </div>
 
-      {inventory && (
-        <pre className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-300 overflow-x-auto whitespace-pre-wrap">
-          {inventoryReport(inventory)}
-        </pre>
+      <pre className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-300 overflow-x-auto whitespace-pre-wrap">
+        {inventoryReport(inventory)}
+      </pre>
+
+      {isRunning && liveStep && (
+        <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs flex items-center gap-2">
+          <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+          <span className="font-semibold text-slate-200">{liveStep}</span>
+        </div>
       )}
 
-      {progress && (
-        <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs space-y-2">
-          <div className="flex items-center gap-2">
-            <Loader2 className={`w-4 h-4 ${progress.phase === "done" ? "text-emerald-400" : "text-indigo-400 animate-spin"}`} />
-            <span className="font-semibold text-slate-200">
-              Fase: {progress.phase} — {progress.uploaded}/{progress.total} subidos, {progress.verified} verificados
-            </span>
-          </div>
-          {progress.errors.length > 0 && (
-            <div className="text-red-300">
-              Errores: {progress.errors.map((e) => `${e.attachmentId}: ${e.error}`).join("; ")}
-            </div>
-          )}
+      {outcome && outcome.steps.length > 0 && !isRunning && (
+        <details className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400">
+          <summary className="cursor-pointer text-slate-300">Detalle de la última ejecución ({outcome.steps.length} pasos)</summary>
+          <ul className="mt-2 space-y-0.5 font-mono">{outcome.steps.map((s) => <li key={s}>{s}</li>)}</ul>
+        </details>
+      )}
+
+      {record?.backupId && (
+        <div className="text-[11px] text-slate-400 font-mono break-all">
+          Última copia de seguridad: {record.backupId} (estado de migración: {record.status})
         </div>
       )}
 
@@ -168,26 +189,34 @@ export default function MigrationPanel({ state, currentUser }: Props) {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={handleDiagnose}
-          disabled={isRunning}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold cursor-pointer disabled:opacity-50"
-        >
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-800 text-slate-300 border border-slate-700 rounded-xl text-xs font-semibold">
           <HardDrive className="w-4 h-4 text-indigo-400" />
-          Diagnosticar (dry-run)
-        </button>
+          Diagnóstico en vivo
+        </span>
 
         <button
           type="button"
           onClick={() => setShowConfirm(true)}
-          disabled={isRunning || !inventory || inventory.legacyCount === 0}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-slate-950 rounded-xl text-xs font-bold cursor-pointer"
+          disabled={!gate.enabled}
+          className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 rounded-xl text-xs font-bold cursor-pointer"
         >
           <Upload className="w-4 h-4" />
           Migrar a Storage (con confirmación)
         </button>
+        {!gate.enabled && gate.reason && <span className="text-[11px] text-slate-500">{gate.reason}</span>}
+
+        {record?.backupId && record.status !== "running" && (
+          <button
+            type="button"
+            onClick={() => setRestoreConfirm(true)}
+            disabled={isRunning}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold cursor-pointer disabled:opacity-40"
+          >
+            <RotateCcw className="w-4 h-4 text-indigo-400" />
+            Restaurar desde la copia
+          </button>
+        )}
       </div>
 
       {showConfirm && (
@@ -195,8 +224,9 @@ export default function MigrationPanel({ state, currentUser }: Props) {
           <div className="flex gap-2 text-amber-300 text-xs">
             <ShieldCheck className="w-4 h-4 shrink-0" />
             <span>
-              Esta acción subirá {inventory?.legacyCount} archivos a Storage, verificará cada uno, creará un backup y actualizará la cartera. No se borrará el contenido histórico hasta verificar. Escribe exactamente{" "}
-              <code className="bg-slate-900 px-1 py-0.5 rounded font-mono">MIGRAR {currentUser}</code> para confirmar.
+              Se creará una copia de seguridad verificada en Storage, se subirán {inventory.legacyCount} archivo(s), se verificará cada uno
+              byte a byte y solo entonces se actualizará la cartera (con comprobación de cambios concurrentes). Los originales no se borran.
+              Escribe exactamente <code className="bg-slate-900 px-1 py-0.5 rounded font-mono">MIGRAR {currentUser}</code> para confirmar.
             </span>
           </div>
           <input
@@ -207,27 +237,38 @@ export default function MigrationPanel({ state, currentUser }: Props) {
             className="w-full bg-slate-950 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-white focus:ring-1 focus:ring-amber-500"
           />
           <div className="flex gap-2 justify-end">
-            <button
-              type="button"
-              onClick={() => setShowConfirm(false)}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs cursor-pointer"
-            >
+            <button type="button" onClick={() => setShowConfirm(false)} className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs cursor-pointer">
               Cancelar
             </button>
-            <button
-              type="button"
-              onClick={handleStartMigration}
-              disabled={isRunning}
-              className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50"
-            >
+            <button type="button" onClick={handleStartMigration} disabled={isRunning} className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50">
               Confirmar migración
             </button>
           </div>
         </div>
       )}
 
+      {restoreConfirm && (
+        <div className="bg-slate-950 border border-slate-700 rounded-xl p-4 space-y-3">
+          <p className="text-xs text-slate-300">
+            Restaurará la cartera al estado de la copia {record?.backupId}. Escribe <code className="bg-slate-900 px-1 py-0.5 rounded font-mono">RESTAURAR {currentUser}</code> para confirmar.
+          </p>
+          <input
+            type="text"
+            value={restoreText}
+            onChange={(e) => setRestoreText(e.target.value)}
+            placeholder={`RESTAURAR ${currentUser}`}
+            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
+          />
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={() => setRestoreConfirm(false)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs cursor-pointer">Cancelar</button>
+            <button type="button" onClick={handleRestore} disabled={isRunning} className="px-4 py-1.5 bg-slate-200 text-slate-900 rounded-lg text-xs font-bold cursor-pointer disabled:opacity-50">Restaurar</button>
+          </div>
+        </div>
+      )}
+
       <div className="text-[10px] text-slate-500 leading-normal">
-        La migración no se inicia automáticamente. Solo se ejecuta cuando un administrador autenticado lo confirma aquí. No se han escrito ni eliminado datos de producción durante esta sesión de código.
+        La migración nunca se inicia automáticamente: solo se ejecuta tras confirmar aquí. Antes de escribir, la copia de seguridad y cada adjunto se verifican;
+        si la cartera cambia durante el proceso, no se escribe nada.
       </div>
     </div>
   );

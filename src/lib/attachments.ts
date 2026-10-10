@@ -1,7 +1,7 @@
 // Firebase Storage operations for attachments.
 // New attachments are stored in Storage and referenced from Firestore by storagePath only.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
-import { ref, uploadBytes, getDownloadURL, getBlob } from "firebase/storage";
+import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
 import { storage, authReady } from "./firebase";
 import {
   AttachmentFolder,
@@ -77,8 +77,10 @@ export async function uploadAttachment(opts: {
   folder: AttachmentFolder;
   file: File;
   attachmentId?: string;
+  /** Solo para contratos generados (.doc). */
+  allowWordDocument?: boolean;
 }): Promise<StoredAttachment> {
-  const invalid = validateAttachment(opts.file);
+  const invalid = validateAttachment(opts.file, { allowWordDocument: opts.allowWordDocument });
   if (invalid) throw new AttachmentError(invalid);
 
   await ensureSignedIn();
@@ -100,6 +102,49 @@ export async function uploadAttachment(opts: {
   }
 
   return { storagePath, name: opts.file.name, contentType, size: opts.file.size };
+}
+
+/** Espera a la sesión de Firebase (necesaria antes de cualquier operación de Storage). */
+export async function ensureFirebaseSession(): Promise<void> {
+  await ensureSignedIn();
+}
+
+/**
+ * Sube bytes ya decodificados (importaciones, contratos generados) y verifica que el objeto
+ * en Storage coincide byte a byte con lo enviado. Si no coincide, lanza AttachmentError.
+ */
+export async function uploadBytesVerified(opts: {
+  userId: string;
+  folder: AttachmentFolder;
+  attachmentId: string;
+  fileName: string;
+  contentType: string;
+  bytes: Uint8Array;
+}): Promise<StoredAttachment> {
+  await ensureSignedIn();
+  const storagePath = attachmentStoragePath(opts.userId, opts.folder, opts.attachmentId, opts.fileName);
+  try {
+    await withTimeout(
+      uploadBytes(ref(storage, storagePath), new Blob([opts.bytes], { type: opts.contentType }), { contentType: opts.contentType }),
+      UPLOAD_TIMEOUT_MS,
+      "La subida del archivo ha superado el tiempo de espera. No se ha guardado la operación; inténtalo de nuevo."
+    );
+    const back = new Uint8Array(
+      await withTimeout(
+        getStorageBytes(ref(storage, storagePath), MAX_ATTACHMENT_BYTES),
+        UPLOAD_TIMEOUT_MS,
+        "La verificación del archivo ha superado el tiempo de espera. No se ha guardado la operación."
+      )
+    );
+    if (back.length !== opts.bytes.length || back.some((b, i) => b !== opts.bytes[i])) {
+      throw new AttachmentError("La verificación del archivo subido ha fallado: el contenido no coincide. La operación no se ha guardado.");
+    }
+  } catch (err) {
+    console.error("Verified upload failed:", storagePath, err);
+    if (err instanceof AttachmentError) throw err;
+    throw new AttachmentError(describeStorageError(err));
+  }
+  return { storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
 }
 
 /** URL temporal para previsualizar (img/iframe). No se persiste en Firestore. */

@@ -11,11 +11,19 @@ export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
  */
 export const PORTFOLIO_DOC_SAFE_BYTES = 1_000_000;
 
+/** Límite duro de Firestore por documento (1 MiB). Solo se usa para mensajes. */
+export const PORTFOLIO_DOC_HARD_BYTES = 1_048_576;
+
+/** Tamaño máximo de una copia de seguridad JSON en Storage (la cartera completa). */
+export const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
+
 export type AttachmentFolder = "expenses" | "property-documents" | "contracts";
 
 /** Lista de contenidos aceptados para nuevos adjuntos. */
 const ALLOWED_MIME_PREFIXES = ["image/"];
 const ALLOWED_MIME_EXACT = ["application/pdf"];
+/** Contratos generados en la aplicación (.doc de Word). Solo se admite en la carpeta de contratos. */
+export const WORD_DOCUMENT_MIME = "application/msword";
 
 /** Deduce el tipo MIME de un fichero, usando la extensión si el navegador no lo informa. */
 export function resolveContentType(name: string, declaredType?: string): string {
@@ -29,14 +37,19 @@ export function resolveContentType(name: string, declaredType?: string): string 
 }
 
 /** Valida tamaño y tipo de un nuevo adjunto antes de subirlo. Devuelve null si es válido. */
-export function validateAttachment(file: { name: string; size: number; type?: string }): string | null {
+export function validateAttachment(
+  file: { name: string; size: number; type?: string },
+  opts: { allowWordDocument?: boolean } = {}
+): string | null {
   if (file.size <= 0) return "El archivo está vacío.";
   if (file.size > MAX_ATTACHMENT_BYTES) {
     return `El archivo supera el límite de ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB.`;
   }
   const type = resolveContentType(file.name, file.type);
   const allowed =
-    ALLOWED_MIME_EXACT.includes(type) || ALLOWED_MIME_PREFIXES.some((p) => type.startsWith(p));
+    ALLOWED_MIME_EXACT.includes(type) ||
+    ALLOWED_MIME_PREFIXES.some((p) => type.startsWith(p)) ||
+    (!!opts.allowWordDocument && type === WORD_DOCUMENT_MIME);
   if (!allowed) return "Formato no admitido. Usa JPG, PNG, WEBP o PDF.";
   return null;
 }
@@ -71,6 +84,16 @@ export function attachmentStoragePath(
     sanitizeFileName(attachmentId),
     sanitizeFileName(fileName),
   ].join("/");
+}
+
+/**
+ * Ruta de la copia de seguridad de una cartera. Direccionada por contenido (SHA-256):
+ * la misma cartera produce siempre la misma ruta, así que repetir una copia no duplica objetos.
+ * Vive fuera de attachments/ para que nunca se confunda con un adjunto.
+ */
+export function portfolioBackupStoragePath(userId: string, sha256Hex: string): string {
+  if (!/^[a-f0-9]{64}$/.test(sha256Hex)) throw new Error("Hash de copia de seguridad no válido.");
+  return ["users", encodeURIComponent(userId), "backups", "portfolio", `${sha256Hex}.json`].join("/");
 }
 
 /** Identificador nuevo para un adjunto (no depende de Date.now() en migraciones). */

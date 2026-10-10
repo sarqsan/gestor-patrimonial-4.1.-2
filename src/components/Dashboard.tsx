@@ -1,4 +1,6 @@
 import { readApiJson } from "../lib/apiResponse";
+import { uploadAttachment } from "../lib/attachments";
+import { newAttachmentId } from "../lib/attachmentRules";
 import React, { useState } from "react";
 import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
 import { 
@@ -239,9 +241,9 @@ export default function Dashboard({
     }
   };
 
-  const handleConfirmScan = () => {
-    if (!extractedResult) return;
-    
+  const handleConfirmScan = async () => {
+    if (!extractedResult || savingScan) return;
+
     const propId = selectedPropertyId || properties[0]?.id;
     if (!propId) {
       setScanError("Selecciona una propiedad.");
@@ -249,18 +251,42 @@ export default function Dashboard({
     }
 
     setSavingScan(true);
-    
+
+    // La factura escaneada se guarda como justificante real en Storage antes del gasto.
+    let receiptFields: Partial<PropertyExpense> = {};
+    if (scannedFile) {
+      if (!state.currentUser) {
+        setScanError("No hay una sesión activa para guardar la factura.");
+        setSavingScan(false);
+        return;
+      }
+      try {
+        const stored = await uploadAttachment({
+          userId: state.currentUser,
+          folder: "expenses",
+          file: scannedFile,
+          attachmentId: newAttachmentId("rcpt"),
+        });
+        receiptFields = { receiptPath: stored.storagePath, receiptName: stored.name, receiptType: stored.contentType };
+      } catch (err) {
+        setScanError(err instanceof Error ? err.message : "No se pudo guardar la factura. El gasto no se ha registrado.");
+        setSavingScan(false);
+        return;
+      }
+    }
+
     const newExpense: PropertyExpense = {
       id: `exp_${Date.now()}`,
       propertyId: propId,
       category: extractedResult.category,
       amount: Number(extractedResult.amount || 0),
       date: extractedResult.date,
-      description: `${extractedResult.description} (NIF: ${extractedResult.nif || 'No detectado'}) [AI-Scanner]`
+      description: `${extractedResult.description} (NIF: ${extractedResult.nif || 'No detectado'}) [AI-Scanner]`,
+      ...receiptFields,
     };
 
     onAddExpense(newExpense);
-    
+
     setScanSuccess(true);
     setTimeout(() => {
       setExtractedResult(null);
