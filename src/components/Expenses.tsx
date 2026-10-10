@@ -3,6 +3,7 @@ import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
 import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment } from "../lib/attachments";
 import { externalizeImportedExpenses } from "../lib/importAttachments";
+import { extractYearFromDate, normalizeDateToIso, isDateOlderThanYears } from "../lib/dateUtils";
 import {
   IMPORT_ACCEPT,
   validateImportFileName,
@@ -48,13 +49,16 @@ import {
   Image as ImageIcon,
   FolderArchive,
   Archive,
-  Loader2
+  Loader2,
+  Pencil,
+  Clock
 } from "lucide-react";
 
 interface ExpensesProps {
   properties: Property[];
   expenses: PropertyExpense[];
   onAddExpense: (newExpense: PropertyExpense) => void;
+  onEditExpense?: (updatedExpense: PropertyExpense) => void;
   onDeleteExpense: (id: string) => void;
   onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => void;
   onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void;
@@ -75,6 +79,7 @@ export default function Expenses({
   properties,
   expenses = [],
   onAddExpense,
+  onEditExpense,
   onDeleteExpense,
   onImportExpenses,
   onUpdateExpenseReceipt,
@@ -84,6 +89,7 @@ export default function Expenses({
 }: ExpensesProps) {
   const [activeSubTab, setActiveSubTab] = useState<"ledger" | "amortization" | "analysis">("ledger");
   const [isAdding, setIsAdding] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<PropertyExpense | null>(null);
   const [filterProperty, setFilterProperty] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterType, setFilterType] = useState<"all" | "gasto" | "ingreso">("all");
@@ -228,7 +234,8 @@ export default function Expenses({
   const getExportFilteredExpenses = () => {
     return expenses.filter(exp => {
       const matchProp = exportSelectedProperty === "all" || exp.propertyId === exportSelectedProperty;
-      const matchYear = exportSelectedYear === "all" || exp.date.startsWith(exportSelectedYear);
+      const expYear = extractYearFromDate(exp.date);
+      const matchYear = exportSelectedYear === "all" || (expYear !== null && String(expYear) === exportSelectedYear);
       return matchProp && matchYear;
     });
   };
@@ -478,6 +485,7 @@ export default function Expenses({
   };
 
   const resetForm = () => {
+    setEditingExpense(null);
     setPropertyId(properties[0]?.id || "");
     setOpType("gasto");
     setCategory("repairs");
@@ -498,6 +506,20 @@ export default function Expenses({
       setError("Debes registrar al menos un inmueble antes de registrar transacciones.");
     }
     resetForm();
+    setIsAdding(true);
+  };
+
+  const handleStartEdit = (exp: PropertyExpense) => {
+    resetForm();
+    setEditingExpense(exp);
+    setPropertyId(exp.propertyId);
+    setOpType(exp.type || (exp.category === "rent" ? "ingreso" : "gasto"));
+    setCategory(exp.category);
+    setAmount(exp.amount.toString());
+    setDate(exp.date);
+    setDescription(exp.description || "");
+    if (exp.receiptPath) setReceiptUrl(exp.receiptPath);
+    if (exp.receiptName) setReceiptName(exp.receiptName);
     setIsAdding(true);
   };
 
@@ -550,18 +572,38 @@ export default function Expenses({
       setIsSavingExpense(false);
     }
 
-    const newExpense: PropertyExpense = {
-      id: expenseId,
-      propertyId,
-      category: finalCategory,
-      type: opType,
-      amount: parsedAmount,
-      date,
-      description: description.trim() || undefined,
-      ...receiptFields,
-    };
+    if (editingExpense) {
+      const updatedExpense: PropertyExpense = {
+        ...editingExpense,
+        propertyId,
+        category: finalCategory,
+        type: opType,
+        amount: parsedAmount,
+        date: normalizeDateToIso(date) || date,
+        description: description.trim() || undefined,
+        ...receiptFields,
+      };
 
-    onAddExpense(newExpense);
+      if (onEditExpense) {
+        onEditExpense(updatedExpense);
+      } else {
+        onAddExpense(updatedExpense);
+      }
+    } else {
+      const newExpense: PropertyExpense = {
+        id: expenseId,
+        propertyId,
+        category: finalCategory,
+        type: opType,
+        amount: parsedAmount,
+        date: normalizeDateToIso(date) || date,
+        description: description.trim() || undefined,
+        ...receiptFields,
+      };
+
+      onAddExpense(newExpense);
+    }
+
     setIsAdding(false);
     resetForm();
   };
@@ -581,10 +623,10 @@ export default function Expenses({
   // Helper to trigger rapid Spanish Amortization integration for a property
   const handleTriggerAmortization = (prop: Property) => {
     // Check if we already have an amortization for this year
-    const hasAmort = expenses.some(e => e.propertyId === prop.id && e.category === 'amortization' && e.date.startsWith("2026"));
+    const hasAmort = expenses.some(e => e.propertyId === prop.id && e.category === 'amortization' && extractYearFromDate(e.date) === currentYear);
     if (hasAmort) {
       setAmortNotification({
-        text: `Ya se ha registrado la amortización correspondiente a 2026 para el inmueble: ${prop.address.split(",")[0]}`,
+        text: `Ya se ha registrado la amortización correspondiente a ${currentYear} para el inmueble: ${prop.address.split(",")[0]}`,
         isError: true
       });
       setTimeout(() => setAmortNotification(null), 5000);
@@ -597,7 +639,7 @@ export default function Expenses({
       category: 'amortization',
       type: 'gasto',
       amount: prop.amortizationAmount,
-      date: '2026-12-31',
+      date: `${currentYear}-12-31`,
       description: `Amortización deducible 3% s/v. construcción (${(100 - prop.landValuePercent)}% de compra)`
     };
 
@@ -612,30 +654,9 @@ export default function Expenses({
   // Maximum 5 years in dropdown selector as per AEAT / Commercial Code view
   const availableYears = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
-  // Automatic 6-year retention purge policy (Art. 30 C.Comercio)
-  // Records older than 6 years (e.g., in 2033, 2026 records are 7 years old and purged) are automatically deleted
-  const [purgedCount, setPurgedCount] = useState<number>(0);
-
-  useEffect(() => {
-    const expiredList = expenses.filter(exp => {
-      const expYear = parseInt(exp.date.split('-')[0], 10);
-      return !isNaN(expYear) && (currentYear - expYear) > 6;
-    });
-
-    if (expiredList.length > 0) {
-      const validExpenses = expenses.filter(exp => {
-        const expYear = parseInt(exp.date.split('-')[0], 10);
-        return isNaN(expYear) || (currentYear - expYear) <= 6;
-      });
-
-      setPurgedCount(prev => prev + expiredList.length);
-      if (onImportExpenses) {
-        onImportExpenses(validExpenses, 'replace');
-      } else {
-        expiredList.forEach(exp => onDeleteExpense(exp.id));
-      }
-    }
-  }, [expenses, currentYear]);
+  // Política de conservación no destructiva (Art. 30 C.Comercio: custodia mínima legal de 6 años)
+  // Ningún registro se purga ni se borra automáticamente sin consentimiento explícito.
+  const historicalRetentionCount = expenses.filter(exp => isDateOlderThanYears(exp.date, 6, currentYear)).length;
 
   // Filtered list
   const filteredExpenses = expenses.filter(exp => {
@@ -647,8 +668,9 @@ export default function Expenses({
     const currentType = isIncome ? 'ingreso' : 'gasto';
     const matchType = filterType === "all" || currentType === filterType;
 
-    // Check year filter
-    const matchYear = filterYear === "all" || exp.date.startsWith(filterYear);
+    // Check year filter (parseo robusto sin asumir formato YYYY-MM-DD ni startsWith)
+    const expYear = extractYearFromDate(exp.date);
+    const matchYear = filterYear === "all" || (expYear !== null && String(expYear) === filterYear);
 
     return matchProp && matchCat && matchType && matchYear;
   });
@@ -817,7 +839,7 @@ export default function Expenses({
         <form onSubmit={handleSubmit} className="bg-slate-900/40 border border-slate-700/50 rounded-2xl p-6 shadow-2xl animate-slide-in text-left">
           <h3 className="text-md font-bold text-white flex items-center mb-6">
             <Receipt className="w-5 h-5 text-indigo-400 mr-2" />
-            <span>Registrar Nueva Operación Contable</span>
+            <span>{editingExpense ? `Editar Operación Contable (${editingExpense.id})` : "Registrar Nueva Operación Contable"}</span>
           </h3>
 
           {error && (
@@ -1050,7 +1072,7 @@ export default function Expenses({
               disabled={isSavingExpense}
               className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-wait text-white font-semibold rounded-xl text-xs transition-all cursor-pointer shadow-lg shadow-indigo-600/15"
             >
-              {isSavingExpense ? "Subiendo comprobante…" : "Guardar Operación"}
+              {isSavingExpense ? "Subiendo comprobante…" : editingExpense ? "Guardar Cambios" : "Guardar Operación"}
             </button>
           </div>
         </form>
@@ -1127,17 +1149,17 @@ export default function Expenses({
             </div>
           </div>
 
-          {/* Retention & Auto-Purge Banner (Art. 30 C.Comercio - 6 años) */}
+          {/* Retention & Non-destructive Custody Banner (Art. 30 C.Comercio - 6 años) */}
           <div className="mb-4 bg-slate-900/60 border border-slate-800 rounded-xl px-3.5 py-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px]">
             <div className="flex items-center space-x-2 text-slate-400">
               <Calendar className="w-4 h-4 text-indigo-400 shrink-0" />
               <span>
-                <strong className="text-slate-200 font-semibold">Regla de Conservación AEAT / Mercantil (6 años):</strong> Los registros con más de 6 años se purgan automáticamente (ej. en {currentYear + 7} se eliminan los de {currentYear + 1}).
+                <strong className="text-slate-200 font-semibold">Conservación legal garantizada (Art. 30 C.Comercio):</strong> Todos los registros contables y comprobantes se conservan de forma íntegra y permanente (mínimo legal 6 años). Ningún movimiento se elimina automáticamente.
               </span>
             </div>
-            {purgedCount > 0 && (
-              <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-md font-mono text-[10px] font-bold">
-                {purgedCount} registros antiguos purgados
+            {historicalRetentionCount > 0 && (
+              <span className="bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 px-2 py-0.5 rounded-md font-mono text-[10px] font-medium">
+                {historicalRetentionCount} registro(s) &gt; 6 años custodiados
               </span>
             )}
           </div>
@@ -1188,7 +1210,19 @@ export default function Expenses({
                             </span>
                           </td>
                           <td className="py-3.5 px-3 text-slate-400 italic font-normal max-w-xs truncate">
-                            {exp.description || "-"}
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate">{exp.description || "-"}</span>
+                              {exp.status === "pending" && (
+                                <span className="shrink-0 text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono font-medium flex items-center gap-1">
+                                  <Clock className="w-2.5 h-2.5 animate-spin" /> Guardando…
+                                </span>
+                              )}
+                              {exp.status === "error" && (
+                                <span className="shrink-0 text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1.5 py-0.2 rounded font-mono font-medium flex items-center gap-1">
+                                  <AlertCircle className="w-2.5 h-2.5" /> Error
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-3.5 px-3 text-center">
                             {hasReceipt(exp) ? (
@@ -1253,14 +1287,24 @@ export default function Expenses({
                                 </button>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => setDeleteConfirmId(exp.id)}
-                                className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors cursor-pointer"
-                                title="Eliminar Registro"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEdit(exp)}
+                                  className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-indigo-950/20 rounded-lg transition-colors cursor-pointer"
+                                  title="Editar Registro"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmId(exp.id)}
+                                  className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors cursor-pointer"
+                                  title="Eliminar Registro"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -1303,7 +1347,7 @@ export default function Expenses({
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {properties.map((prop) => {
-              const hasAmort = expenses.some(e => e.propertyId === prop.id && e.category === 'amortization' && e.date.startsWith("2026"));
+              const hasAmort = expenses.some(e => e.propertyId === prop.id && e.category === 'amortization' && extractYearFromDate(e.date) === currentYear);
               return (
                 <div key={prop.id} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between hover:border-slate-700 transition-colors">
                   <div className="space-y-4">
@@ -1317,7 +1361,7 @@ export default function Expenses({
                           ? "bg-emerald-950/30 text-emerald-400 border-emerald-500/20" 
                           : "bg-amber-950/30 text-amber-400 border-amber-500/20"
                       }`}>
-                        {hasAmort ? "✓ Amortización 2026 Integrada" : "⚠ Amortización Pendiente"}
+                        {hasAmort ? `✓ Amortización ${currentYear} Integrada` : "⚠ Amortización Pendiente"}
                       </span>
                     </div>
 

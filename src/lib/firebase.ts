@@ -71,7 +71,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   return errInfo;
 }
 
-// Validate Connection to Firestore on boot
+// Validate Connection to Firestore on boot (only in browser environment)
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
@@ -81,7 +81,10 @@ async function testConnection() {
     }
   }
 }
-testConnection();
+
+if (typeof window !== "undefined") {
+  testConnection();
+}
 
 export { doc, getDoc, setDoc, onSnapshot };
 

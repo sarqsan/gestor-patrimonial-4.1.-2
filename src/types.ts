@@ -120,6 +120,7 @@ export interface PropertyExpense {
   receiptPath?: string; // Ruta en Firebase Storage (nuevos comprobantes)
   receiptName?: string;
   receiptType?: string;
+  status?: 'synced' | 'pending' | 'error';
 }
 
 export interface AppState {

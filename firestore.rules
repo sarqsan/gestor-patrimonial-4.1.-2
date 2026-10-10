@@ -1,16 +1,74 @@
+// Reglas de seguridad de Cloud Firestore para Gestor Patrimonial.
+// Diseñadas para persistencia duradera de la cartera y subcolecciones de movimientos
+// con autorización estricta por propietario y bloqueo de acceso no autorizado.
+//
+// Principios de seguridad:
+// 1. SIN ACCESO PÚBLICO: Todas las operaciones exigen autenticación válida (request.auth != null).
+// 2. AUTORIZACIÓN POR PROPIETARIO: Solo el propietario legítimo puede leer o escribir sus datos.
+//    - Comprueba coincidencia directa por UID (request.auth.uid == userId)
+//    - O coincidencia de correo/username en token autenticado
+//    - O coincidencia de ownerUid en el documento del movimiento contable.
+// 3. SUBCOLECCIÓN DE MOVIMIENTOS (/expenses/{expenseId}): cada apunte está vinculado a su propietario.
+// 4. INMUTABILIDAD DE COPIAS DE SEGURIDAD (/backups/{backupId}): no se permite actualizar ni borrar (delete: if false).
+// 5. BLOQUEO POR DEFECTO: Cualquier ruta fuera del árbol autorizado se deniega (allow read, write: if false).
+//
+// NOTA TÉCNICA SOBRE IDENTIDAD Y SESIÓN:
+// La sesión cliente utiliza actualmente autenticación anónima (signInAnonymously), generando un UID efímero.
+// Para garantizar el aislamiento criptográfico estricto sin dependencias locales, los documentos
+// registran su 'ownerUid' asociado a la sesión de Firebase Auth.
+
 rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Función de autorización por propietario legítimo
+    function isOwner(userId) {
+      return request.auth != null && (
+        request.auth.uid == userId ||
+        request.auth.token.email == userId ||
+        request.auth.token.username == userId
+      );
+    }
+
     match /users/{userId} {
-      allow read, write: if true;
-      match /{document=**} {
-        allow read, write: if true;
+      // Documento raíz y subcolecciones autorizados solo para el propietario
+      allow read, write: if isOwner(userId);
+
+      // Documento de cartera (portfolio)
+      match /data/{docId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Subcolección dedicada para movimientos contables (gastos e ingresos)
+      match /expenses/{expenseId} {
+        allow read, write: if isOwner(userId)
+          || (request.auth != null && (
+                (resource != null && resource.data.ownerUid == request.auth.uid) ||
+                (request.resource != null && request.resource.data.ownerUid == request.auth.uid)
+             ));
+      }
+
+      // Copias de seguridad: inmutables tras su creación (solo crear y leer)
+      match /backups/{backupId} {
+        allow read, create: if isOwner(userId);
+        allow update, delete: if false;
+      }
+
+      // Registros de migraciones
+      match /migrations/{migrationId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Otras subcolecciones bajo el usuario
+      match /{allChildren=**} {
+        allow read, write: if isOwner(userId);
       }
     }
-    match /{document=**} {
-      allow read, write: if true;
+
+    // Bloqueo explícito por defecto de cualquier otra ruta
+    match /{allPaths=**} {
+      allow read, write: if false;
     }
   }
 }
-

@@ -12,6 +12,7 @@
 //    sin confundir una cosa con la otra.
 
 import { Property, PropertyExpense } from "../types";
+import { normalizeDateToIso } from "./dateUtils";
 
 // ---------------------------------------------------------------------------
 // Selección y validación de archivos
@@ -102,12 +103,10 @@ export function parseFlexibleNumber(value: unknown): number | null {
   return Number.isFinite(n) ? (neg ? -n : n) : null;
 }
 
-/** Fecha en claro: números seriales de Excel (p. ej. 45000) → YYYY-MM-DD; texto se conserva. */
+/** Fecha en claro: números seriales de Excel (p. ej. 45000) o DD/MM/YYYY → YYYY-MM-DD; texto se conserva si no es reconocible. */
 function normalizeDateValue(value: unknown): string | null {
-  if (typeof value === "number" && Number.isFinite(value) && value > 20000 && value < 80000) {
-    const ms = Math.round((value - 25569) * 86400 * 1000);
-    return new Date(ms).toISOString().slice(0, 10);
-  }
+  const iso = normalizeDateToIso(value);
+  if (iso) return iso;
   if (typeof value === "string" && value.trim() !== "") return value.trim();
   return null;
 }
