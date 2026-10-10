@@ -12,6 +12,8 @@ import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, SaveStatus
 import { checkPortfolioWrite, legacyDataUrlSet } from "./lib/portfolioGuard";
 import { mergeMigratedReferences } from "./lib/portfolioMigrationRun";
 import { portfolioBody } from "./lib/portfolioPayload";
+import { extractYearFromDate } from "./lib/dateUtils";
+import { mergeExpensesOnHydration, mergePropertiesOnHydration } from "./lib/portfolioHydration";
 import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
 import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
 import { 
@@ -266,7 +268,7 @@ export default function App() {
             (e) =>
               e.propertyId === p.id &&
               e.type === "gasto" &&
-              parseInt(e.date.split("-")[0] || "0") === year
+              extractYearFromDate(e.date) === year
           );
 
           const hasCommunity = propertyExpenses.some((e) => e.category === "community");
@@ -304,50 +306,77 @@ export default function App() {
     const userDocRef = doc(db, "users", state.currentUser, "data", "portfolio");
 
     // Initial fetch from Firestore
-    getDoc(userDocRef).then((snapshot) => {
-      if (dirtyRef.current) return; // cambios locales pendientes: no sobrescribir con la nube
-      if (snapshot.exists()) {
-        const cloudData = snapshot.data();
-        for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
-        setState((prev) => ({
-          ...prev,
-          properties: cloudData.properties || prev.properties,
-          payments: cloudData.payments || prev.payments,
-          expenses: cloudData.expenses || prev.expenses,
-          contracts: cloudData.contracts || prev.contracts,
-          syncEvents: cloudData.syncEvents || prev.syncEvents,
-          yearlyProfiles: cloudData.yearlyProfiles || prev.yearlyProfiles,
-          currentYear: cloudData.currentYear || prev.currentYear || 2026,
-          isOnboarded: cloudData.isOnboarded !== undefined ? cloudData.isOnboarded : prev.isOnboarded,
-          user1: cloudData.user1 || prev.user1,
-          user2: cloudData.user2 || prev.user2
-        }));
-      }
-    }).catch((err) => {
-      handleFirestoreError(err, OperationType.GET, path);
-    });
+    getDoc(userDocRef)
+      .then((snapshot) => {
+        if (dirtyRef.current) return; // cambios locales pendientes: no sobrescribir con la nube
+        if (snapshot.exists()) {
+          const cloudData = snapshot.data();
+          for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
+          setState((prev) => {
+            const mergedExpenses = mergeExpensesOnHydration(cloudData.expenses, prev.expenses);
+            const mergedProperties = mergePropertiesOnHydration(cloudData.properties, prev.properties);
+            if (mergedExpenses.length > (cloudData.expenses?.length || 0)) {
+              localChangeRef.current = true;
+            }
+            return {
+              ...prev,
+              properties: mergedProperties,
+              payments: cloudData.payments || prev.payments,
+              expenses: mergedExpenses,
+              contracts: cloudData.contracts || prev.contracts,
+              syncEvents: cloudData.syncEvents || prev.syncEvents,
+              yearlyProfiles: cloudData.yearlyProfiles || prev.yearlyProfiles,
+              currentYear: cloudData.currentYear || prev.currentYear || 2026,
+              isOnboarded: cloudData.isOnboarded !== undefined ? cloudData.isOnboarded : prev.isOnboarded,
+              user1: cloudData.user1 || prev.user1,
+              user2: cloudData.user2 || prev.user2,
+            };
+          });
+        }
+      })
+      .catch((err) => {
+        handleFirestoreError(err, OperationType.GET, path);
+        setSaveStatus({
+          kind: "error",
+          message: `Error al leer de la nube (${describePersistenceError(err)}). Se mantienen los datos locales de este dispositivo.`,
+          at: Date.now(),
+        });
+      });
 
     // Subscribe to real-time updates
-    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
-      // Si hay cambios locales sin confirmar, no los reemplazamos silenciosamente por la nube.
-      if (dirtyRef.current) return;
-      if (docSnap.exists()) {
-        const cloudData = docSnap.data();
-        for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
-        setState((prev) => ({
-          ...prev,
-          properties: cloudData.properties || prev.properties,
-          payments: cloudData.payments || prev.payments,
-          expenses: cloudData.expenses || prev.expenses,
-          contracts: cloudData.contracts || prev.contracts,
-          syncEvents: cloudData.syncEvents || prev.syncEvents,
-          yearlyProfiles: cloudData.yearlyProfiles || prev.yearlyProfiles,
-          currentYear: cloudData.currentYear || prev.currentYear || 2026
-        }));
+    const unsubscribe = onSnapshot(
+      userDocRef,
+      (docSnap) => {
+        // Si hay cambios locales sin confirmar, no los reemplazamos silenciosamente por la nube.
+        if (dirtyRef.current) return;
+        if (docSnap.exists()) {
+          const cloudData = docSnap.data();
+          for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
+          setState((prev) => {
+            const mergedExpenses = mergeExpensesOnHydration(cloudData.expenses, prev.expenses);
+            const mergedProperties = mergePropertiesOnHydration(cloudData.properties, prev.properties);
+            return {
+              ...prev,
+              properties: mergedProperties,
+              payments: cloudData.payments || prev.payments,
+              expenses: mergedExpenses,
+              contracts: cloudData.contracts || prev.contracts,
+              syncEvents: cloudData.syncEvents || prev.syncEvents,
+              yearlyProfiles: cloudData.yearlyProfiles || prev.yearlyProfiles,
+              currentYear: cloudData.currentYear || prev.currentYear || 2026,
+            };
+          });
+        }
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.GET, path);
+        setSaveStatus({
+          kind: "error",
+          message: `Error en la sincronización en tiempo real (${describePersistenceError(err)}).`,
+          at: Date.now(),
+        });
       }
-    }, (err) => {
-      handleFirestoreError(err, OperationType.GET, path);
-    });
+    );
 
     return () => unsubscribe();
   }, [state.currentUser, state.isAuthenticated]);
@@ -463,74 +492,9 @@ export default function App() {
   // EDIT PROPERTY
   const handleEditProperty = (updatedProp: Property) => {
     updateState((prev) => {
-      const oldProp = prev.properties.find((p) => p.id === updatedProp.id);
-      let updatedExpenses = prev.expenses || [];
-      const year = prev.currentYear || 2026;
-
-      if (oldProp) {
-        // Helper to sync edited static field back to actual expenses
-        const syncFieldToExpense = (
-          field: "expensesCommunity" | "expensesIBI" | "expensesInsurance" | "expensesRepairs",
-          category: "community" | "ibi" | "insurance" | "repairs",
-          catLabel: string
-        ) => {
-          if (updatedProp[field] !== oldProp[field]) {
-            // Find existing expenses of this category for this property in this year
-            const existingCatExpenses = updatedExpenses.filter(
-              (e) =>
-                e.propertyId === updatedProp.id &&
-                e.category === category &&
-                e.type === "gasto" &&
-                parseInt(e.date.split("-")[0] || "0") === year
-            );
-
-            if (updatedProp[field] === 0) {
-              // Delete all expenses of this category
-              updatedExpenses = updatedExpenses.filter(
-                (e) =>
-                  !(
-                    e.propertyId === updatedProp.id &&
-                    e.category === category &&
-                    e.type === "gasto" &&
-                    parseInt(e.date.split("-")[0] || "0") === year
-                  )
-              );
-            } else {
-              // Replace all existing ones with a single representative one
-              const otherExpenses = updatedExpenses.filter(
-                (e) =>
-                  !(
-                    e.propertyId === updatedProp.id &&
-                    e.category === category &&
-                    e.type === "gasto" &&
-                    parseInt(e.date.split("-")[0] || "0") === year
-                  )
-              );
-
-              const newExpense: PropertyExpense = {
-                id: existingCatExpenses[0]?.id || `exp_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                propertyId: updatedProp.id,
-                category,
-                type: "gasto",
-                amount: updatedProp[field],
-                date: existingCatExpenses[0]?.date || `${year}-01-15`,
-                description: existingCatExpenses[0]?.description || `Gasto de ${catLabel} (Sincronizado desde Ficha)`
-              };
-
-              updatedExpenses = [...otherExpenses, newExpense];
-            }
-          }
-        };
-
-        syncFieldToExpense("expensesCommunity", "community", "Comunidad");
-        syncFieldToExpense("expensesIBI", "ibi", "IBI");
-        syncFieldToExpense("expensesInsurance", "insurance", "Seguro de Hogar/Impago");
-        syncFieldToExpense("expensesRepairs", "repairs", "Reparación/Conservación");
-      }
-
-      // Update monthly rent inside existing payments if it changed
+      // Actualizar la renta mensual en los cobros pendientes si se modificó
       const updatedPayments = prev.payments.map((p) => {
-        if (p.propertyId === updatedProp.id && p.status === 'pending') {
+        if (p.propertyId === updatedProp.id && p.status === "pending") {
           return { ...p, amount: updatedProp.monthlyRent };
         }
         return p;
@@ -538,9 +502,11 @@ export default function App() {
 
       return {
         ...prev,
-        expenses: updatedExpenses,
-        properties: prev.properties.map((p) => p.id === updatedProp.id ? updatedProp : p),
-        payments: updatedPayments
+        // Los movimientos contables detallados, sus justificantes e IDs se conservan íntegros:
+        // modificar importes estimados en la ficha jamás destruye ni colapsa recibos registrados.
+        expenses: prev.expenses || [],
+        properties: prev.properties.map((p) => (p.id === updatedProp.id ? updatedProp : p)),
+        payments: updatedPayments,
       };
     });
 
@@ -548,7 +514,7 @@ export default function App() {
       "Cartera Inmuebles",
       "Dashboard & Simulador IRPF",
       `Actualización inmueble ${updatedProp.address.split(",")[0]}`,
-      `Modificados parámetros fiscales y renta del inmueble. Gastos e IRPF sincronizados en tiempo real.`
+      `Modificados parámetros fiscales y renta del inmueble sin alterar los movimientos contables registrados.`
     );
   };
 
