@@ -64,6 +64,60 @@ export function dataUrlToBytes(dataUrl: string): Uint8Array | null {
 }
 
 /**
+ * Cuota conservadora de localStorage por origen, en caracteres UTF-16.
+ * La mayoría de navegadores dan ~5 MB por origen (1 char UTF-16 = 2 bytes) →
+ * 2,5 M caracteres. Se usa como estimación para NO confirmar un guardado local
+ * que el navegador vaya a rechazar por cuota (evita falsos éxitos).
+ */
+export const LOCAL_STORAGE_QUOTA_CHARS = 2_500_000;
+
+/** Margen adicional (JSON de la cartera, claves, cabeceras) sobre la data URL. */
+export const LOCAL_INLINE_CAPACITY_MARGIN_CHARS = 8_192;
+
+/**
+ * Estima los caracteres libres de localStorage. Devuelve null si no se puede
+ * estimar (p. ej. sin entorno navegador): en ese caso la confirmación se fía al
+ * try/catch de escritura del estado (backstop existente en App.tsx).
+ */
+export function estimateLocalFreeChars(): number | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    let used = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key == null) continue;
+      used += key.length + (localStorage.getItem(key) ?? "").length;
+    }
+    return Math.max(0, LOCAL_STORAGE_QUOTA_CHARS - used);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decisión pura de capacidad: ¿cabe una data URL de `dataUrlChars` caracteres en
+ * `freeChars` libres? Devuelve el motivo o null si cabe. freeChars === null ⇒ no
+ * estimable ⇒ se permite continuar (el backstop de escritura sigue protegiendo).
+ */
+export function localInlineCapacityProblem(opts: {
+  dataUrlChars: number;
+  freeChars: number | null;
+  marginChars?: number;
+}): string | null {
+  if (opts.freeChars === null) return null;
+  const margin = opts.marginChars ?? LOCAL_INLINE_CAPACITY_MARGIN_CHARS;
+  if (opts.dataUrlChars + margin > opts.freeChars) {
+    return (
+      `el almacenamiento local de este navegador no tiene espacio suficiente para guardarlo ` +
+      `(quedan ~${Math.max(0, Math.round(opts.freeChars / 1024))} KB y el archivo necesita ` +
+      `~${Math.round(opts.dataUrlChars / 1024)} KB). Libera espacio eliminando datos de navegación ` +
+      `o restablece el acceso a Firebase Storage.`
+    );
+  }
+  return null;
+}
+
+/**
  * Intenta reducir una imagen en el navegador (canvas + JPEG) hasta que quepa en el
  * presupuesto. Devuelve null si no es posible o si no hay entorno de navegador.
  * Nunca lanza: la vía local degrada a error claro si no puede comprimir.

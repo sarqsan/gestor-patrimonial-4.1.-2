@@ -280,6 +280,71 @@ reutiliza ese formato como contingencia:
   persistencia en Firestore real. La causa raíz administrativa permanece; esta entrega restaura la
   función de adjuntar comprobantes sin depender de ella, no la sustituye ni la declara resuelta.
 
+## Apéndice C — Revisión final del PR #9 (pre-merge, 2026-10-10)
+
+Revisión ordenada antes del merge, con resultados verificables por punto.
+
+### C.1. Persistencia real
+
+| Comprobación | Resultado | Cómo |
+| --- | --- | --- |
+| Recarga / cierre de sesión / re-login (mismo navegador) | El comprobante local vive en `state.expenses[].receiptUrl`, serializado en `rentasync_state_{usuario}` en cada cambio de estado; sobrevive a recarga y a logout/login | Inspección de `App.tsx` (efecto de guardado + `handleLoginSuccess`) + tests V1 |
+| Otra pestaña (mismo usuario) | Comparte la misma clave por usuario (comportamiento preexistente de la app, no introducido por este PR) | Inspección de `App.tsx` |
+| Limpieza de datos / otro dispositivo / otro navegador | **NO sobrevive**: limitación inherente al almacenamiento local; se comunica al usuario en cada guardado y la vía de recuperación es la exportación (C.4) | Diseño documentado |
+| Límites y cuota: fallo al guardar sin falso éxito | **DEFECTO DETECTADO Y CORREGIDO**: el aviso de éxito podía adelantarse a la escritura en localStorage. Ahora `storeLocalInlineFallback` comprueba capacidad real ANTES de confirmar; si no cabe, lanza error claro y el archivo no se da por guardado | Test V1a (almacén lleno → rechazo), V1b (con espacio → éxito recuperable), V1d (decisión de capacidad) |
+
+### C.2. Aislamiento por usuario
+
+- Claves `rentasync_state_{usuario}` estrictamente por usuario; el login reemplaza el estado completo
+  (`setState(loadedState)`): no se arrastran datos del usuario anterior. Verificado por inspección + test V2.
+- La vía local **no crea ninguna clave nueva ni compartida**: la estimación de capacidad solo lee y el
+  módulo de adjuntos no escribe en localStorage (test V1c: cero escrituras). La persistencia la hace
+  el efecto preexistente de la app bajo la clave del usuario actual.
+- Cierre de sesión y re-entrada con la misma cuenta: el estado se rehidrata de la misma clave; los
+  comprobantes locales siguen disponibles. Sin Firebase no hay sesión global que invalidar.
+
+### C.3. Integridad y compatibilidad
+
+- Puntos de subida afectados: comprobantes de gastos (Expenses ×2, Dashboard) y documentos de
+  inmueble (Properties). Contratos e importaciones verificadas: comportamiento estricto intacto.
+- Lectura: visor de comprobantes (por `receiptPath` o `receiptUrl`), descarga (`downloadAttachment`
+  con `storagePath`/`inlineData`/`fileData`), exportación ZIP/AEAT (`getAttachmentBlob` con ambos
+  orígenes). Registros antiguos `receiptUrl`, nuevos `receiptPath` y documentos `fileData` funcionan.
+- **Externalización posterior a Firebase probada**: un `receiptUrl` producido por la vía local se
+  convierte en `receiptPath` con `externalizeImportedExpenses` sin perder metadatos (test V3b).
+- Fallo de red ≠ rechazo administrativo: test V3c (y L5/R-suite). La vía local solo se activa con la
+  clase administrativa.
+
+### C.4. Recuperación y protección frente a pérdidas
+
+- **Exportación recuperable SÍ existe**: el JSON de movimientos incluye el Base64 del comprobante
+  local (test V4, round-trip íntegro) y el paquete ZIP/AEAT incluye el archivo real vía
+  `getAttachmentBlob` (funciona sin Firebase). Recomendado: exportar periódicamente mientras dure el bloqueo.
+- Eliminación de un movimiento: borra el documento Firestore (si hay acceso) y la entrada local; los
+  comprobantes inline no dejan huérfanos en Storage (nunca llegaron a subirse).
+- Restauración de copia anterior: reemplaza el estado por la copia (semántica preexistente); los
+  comprobantes locales posteriores a la copia se pierden del estado local, como cualquier otro dato
+  posterior a la copia. Las copias de seguridad en Storage no se pueden crear mientras dure el bloqueo
+  (limitación preexistente de la incidencia, no de este PR).
+- Borrado del almacenamiento del navegador: pierde los comprobantes locales; los datos en Firebase y
+  las exportaciones previas permanecen. No se ha eliminado ni sobrescrito ningún archivo durante la revisión.
+- Reimportación de un JSON con comprobantes Base64 **mientras dure el bloqueo**: se cancela con error
+  claro antes de tocar la cartera (la externalización exige Storage). No hay importación parcial ni
+  pérdida: los datos siguen en el fichero exportado y se reimportarán al restablecerse el acceso.
+
+### C.5. Estado de la verificación
+
+- **Probado** (226 tests, 0 fallos; `tsc`; `vite build`): antifalso-éxito por cuota, aislamiento,
+  compatibilidad de los tres formatos, externalización, recuperación por exportación, distinción
+  red/administrativo.
+- **No verificable desde este entorno**: comportamiento en navegador real (recargas, pestañas,
+  limpieza de datos) y contra Firebase real (sigue bloqueado). La subida contra Storage real y la
+  persistencia Firestore real quedan pendientes del desbloqueo administrativo (§4/A.4).
+
+Conclusión de la revisión: el mecanismo es seguro para el uso previsto (sin pérdida silenciosa, sin
+contaminación entre usuarios, sin falsos éxitos tras la corrección de cuota) y sus limitaciones están
+comunicadas al usuario y documentadas. PR listo para merge a falta de la autorización correspondiente.
+
 ## 7. Datos y seguridad: garantías mantenidas
 
 - Proyecto Firebase e identificador de base de datos: sin cambios.

@@ -16,7 +16,10 @@ import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./
 import {
   LOCAL_INLINE_MAX_RAW_BYTES,
   blobToDataUrl,
+  dataUrlApproxChars,
+  estimateLocalFreeChars,
   localInlineBudgetProblem,
+  localInlineCapacityProblem,
   maybeDownscaleImage,
 } from "./localVault";
 import type { PropertyExpense } from "../types";
@@ -122,6 +125,9 @@ export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partia
  * Vía de contingencia SOLO ante bloqueo administrativo (auth/admin-restricted-operation):
  * guarda el adjunto como data URL (formato legado) para la copia local del usuario.
  * No escribe en Firebase, no cambia reglas ni rutas de Storage, no reasigna nada.
+ *
+ * Antifalso-éxito: antes de confirmar, comprueba presupuesto por archivo Y capacidad
+ * real de localStorage. Si no cabe, lanza un error claro y el archivo NO se da por guardado.
  */
 async function storeLocalInlineFallback(file: File): Promise<StoredAttachment> {
   let candidate: Blob = file;
@@ -140,6 +146,17 @@ async function storeLocalInlineFallback(file: File): Promise<StoredAttachment> {
   if (problem) {
     throw new AdminRestrictedAttachmentError(
       `Firebase Auth está bloqueado por administración y el archivo no cabe en la vía local: ${problem}`
+    );
+  }
+
+  // Capacidad real del almacenamiento local: no confirmar un guardado que el navegador rechazará.
+  const capacityProblem = localInlineCapacityProblem({
+    dataUrlChars: dataUrlApproxChars(candidate.size),
+    freeChars: estimateLocalFreeChars(),
+  });
+  if (capacityProblem) {
+    throw new AdminRestrictedAttachmentError(
+      `Firebase Auth está bloqueado por administración y ${capacityProblem}`
     );
   }
 
