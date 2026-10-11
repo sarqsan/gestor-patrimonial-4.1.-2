@@ -91,3 +91,4 @@ jobs:
             echo "::warning::No se pudo publicar la evidencia como comentario del PR #$PR ($NOMBRE)."
           fi
           exit 0
+# (re-verificación del candidato tras configurar el bypass)
