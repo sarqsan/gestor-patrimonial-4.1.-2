@@ -1,0 +1,36 @@
+# Verificación de persistencia contra un despliegue REAL (producción o previsualización).
+#
+# Se ejecuta SOLO bajo demanda (workflow_dispatch) y usa únicamente datos sintéticos,
+# sin secretos: el runner de GitHub sí puede alcanzar vercel.app (el entorno de desarrollo
+# de Arena no), de modo que esta es la vía autorizada para obtener evidencia real del
+# despliegue: enrutado, almacén Blob, SHA-256, persistencia tras reinicios y aislamiento.
+#
+# Uso:  gh workflow run verificacion-persistencia.yml -f target_url=https://…
+name: Verificación de persistencia (despliegue real)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "URL base del despliegue a verificar (producción o previsualización)"
+        required: true
+        default: "https://gestor-patrimonial-4-1-2.vercel.app"
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verificación sintética end-to-end
+        run: node scripts/verificacion-persistencia.mjs "${{ inputs.target_url }}"
+      - name: Registrar resumen
+        if: always()
+        run: |
+          {
+            echo "## Verificación de persistencia — ${{ inputs.target_url }}"
+            echo "Resultado del paso de verificación: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
