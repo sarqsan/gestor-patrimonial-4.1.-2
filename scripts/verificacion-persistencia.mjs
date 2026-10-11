@@ -31,6 +31,9 @@ const results = [];
 function check(name, ok, detail = "") {
   results.push({ name, ok: Boolean(ok), detail: String(detail).slice(0, 300) });
   console.log(`${ok ? "OK  " : "FALLO"} ${name}${detail ? ` — ${detail}` : ""}`);
+  // Anotaciones de GitHub Actions: visibles también sin descarga de logs.
+  const line = `${name}${detail ? ` — ${detail}` : ""}`.replace(/\r?\n/g, " ").slice(0, 250);
+  if (process.env.GITHUB_ACTIONS) console.log(`${ok ? "::notice" : "::error"} title=verificacion::${line}`);
   return Boolean(ok);
 }
 

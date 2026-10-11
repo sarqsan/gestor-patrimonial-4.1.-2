@@ -4,7 +4,8 @@
 # de desarrollo de Arena no), de modo que esta es la vía autorizada para obtener evidencia real
 # del despliegue: enrutado, almacén Blob, SHA-256, persistencia tras reinicios y aislamiento.
 #
-# Se dispara con cada push a la rama de trabajo y bajo demanda (workflow_dispatch).
+# La evidencia se publica como comentario del PR de la rama (además de en los logs y anotaciones)
+# porque los logs de Actions no siempre son descargables desde el entorno de desarrollo.
 name: Verificación de persistencia (despliegue real)
 
 on:
@@ -20,6 +21,11 @@ on:
       - "src/lib/vaultClient.ts"
       - "vercel.json"
       - "package.json"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   verificar:
@@ -40,12 +46,40 @@ jobs:
         with:
           node-version: "20"
       - name: Verificación sintética end-to-end
-        run: node scripts/verificacion-persistencia.mjs "${{ matrix.target_url }}"
-      - name: Registrar resumen
-        if: always()
         run: |
+          set -o pipefail
+          node scripts/verificacion-persistencia.mjs "${{ matrix.target_url }}" | tee /tmp/verif.out
+      - name: Publicar evidencia en el PR de la rama
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target_url }}
+          NOMBRE: ${{ matrix.nombre }}
+        run: |
+          MARK="<!-- verificacion-persistencia-$NOMBRE -->"
           {
-            echo "## Verificación de persistencia — ${{ matrix.nombre }}"
-            echo "Objetivo: ${{ matrix.target_url }}"
-            echo "Resultado: ${{ job.status }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "$MARK"
+            echo "### 🧪 Verificación de persistencia — $NOMBRE"
+            echo ""
+            echo "- Objetivo: \`$TARGET\`"
+            echo "- Ejecución: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- Resultado del paso: ${{ job.status }}"
+            echo ""
+            echo '```'
+            tail -n 200 /tmp/verif.out 2>/dev/null || echo "(sin salida registrada)"
+            echo '```'
+          } > /tmp/evidencia.md
+          PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "Sin PR abierto para $GITHUB_REF_NAME: la evidencia queda solo en la ejecución."
+            exit 0
+          fi
+          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$MARK\")) | .id] | first // empty")
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$PR/comments/$EXISTING" -F body=@/tmp/evidencia.md > /dev/null
+            echo "Evidencia actualizada en el comentario $EXISTING del PR #$PR."
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/evidencia.md > /dev/null
+            echo "Evidencia publicada como comentario del PR #$PR."
+          fi
