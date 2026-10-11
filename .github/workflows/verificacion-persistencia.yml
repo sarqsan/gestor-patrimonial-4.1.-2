@@ -69,17 +69,17 @@ jobs:
             tail -n 200 /tmp/verif.out 2>/dev/null || echo "(sin salida registrada)"
             echo '```'
           } > /tmp/evidencia.md
+          # Nota: los tokens de integración no pueden editar/borrar comentarios (API 404),
+          # así que se publica SIEMPRE un comentario nuevo por ejecución y destino; el
+          # histórico documenta cada pasada. Un fallo aquí se avisa sin enmascarar el veredicto.
           PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open --json number --jq '.[0].number // empty')
           if [ -z "$PR" ]; then
             echo "Sin PR abierto para $GITHUB_REF_NAME: la evidencia queda solo en la ejecución."
             exit 0
           fi
-          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
-            --jq "[.[] | select(.body | contains(\"$MARK\")) | .id] | first // empty")
-          if [ -n "$EXISTING" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$PR/comments/$EXISTING" -F body=@/tmp/evidencia.md > /dev/null
-            echo "Evidencia actualizada en el comentario $EXISTING del PR #$PR."
+          if gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/evidencia.md > /dev/null; then
+            echo "Evidencia publicada como comentario del PR #$PR ($NOMBRE, ejecución ${{ github.run_id }})."
           else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/evidencia.md > /dev/null
-            echo "Evidencia publicada como comentario del PR #$PR."
+            echo "::warning::No se pudo publicar la evidencia como comentario del PR #$PR ($NOMBRE)."
           fi
+          exit 0
