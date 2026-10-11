@@ -1,3 +1,4 @@
+import { signOut } from "firebase/auth";
 import React, { useState, useEffect, useRef } from "react";
 import Onboarding from "./components/Onboarding";
 import Dashboard from "./components/Dashboard";
@@ -12,6 +13,9 @@ import { AppState, Property, RentPayment, SyncEvent, PropertyExpense, SaveStatus
 import { checkPortfolioWrite, legacyDataUrlSet } from "./lib/portfolioGuard";
 import { mergeMigratedReferences } from "./lib/portfolioMigrationRun";
 import { portfolioBody } from "./lib/portfolioPayload";
+import { persistAttachedExpense, persistAttachedProperty, PendingAttachmentReference } from "./lib/attachmentPersistence";
+import { AttachmentWriteCoordinator } from "./lib/attachmentWriteCoordinator";
+import { AttachmentError, attachmentPhase, ATTACHMENT_TIMEOUTS } from "./lib/attachmentErrors";
 import { extractYearFromDate, normalizeDateToIso } from "./lib/dateUtils";
 import { mergeExpensesOnHydration, mergePropertiesOnHydration } from "./lib/portfolioHydration";
 import { 
@@ -23,12 +27,13 @@ import {
   migrateLegacyPortfolioExpenses, 
   movementSignature 
 } from "./lib/movementService";
-import { db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
+import { auth, db, doc, getDoc, setDoc, onSnapshot, handleFirestoreError, OperationType } from "./lib/firebase";
 import {
   vaultEnsureSession,
   vaultGetMovements,
   vaultPutMovements,
   clearVaultToken,
+  vaultLogoutSession,
   getVaultToken,
   setActiveVaultUser,
   flushQueuedReceiptsToVault,
@@ -160,7 +165,27 @@ export default function App() {
   const legacyBaselineRef = useRef<Set<string>>(new Set());
   const writeSeqRef = useRef(0);
   const lastOkSeqRef = useRef(0);
+  const attachmentWritesRef = useRef(new AttachmentWriteCoordinator());
+  const logoutPendingRef = useRef(false);
+  const currentUserRef = useRef(state.currentUser);
+  currentUserRef.current = state.currentUser;
 
+  // Coordina SOLO la persistencia indispensable para no pisar asociaciones recién confirmadas.
+  // La espera en cola también tiene plazo y jamás ejecuta un commit si ya fue cancelado.
+  const runAttachedCommit = <T,>(user: string, commit: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    dirtyRef.current = true;
+    return attachmentPhase("persistence", getVaultToken(user) ? "vault" : "firebase", ATTACHMENT_TIMEOUTS.persistence,
+      (signal) => attachmentWritesRef.current.attachment(user, async () => {
+        const assertAccount = () => {
+          if (currentUserRef.current !== user) throw new AttachmentError("La cuenta activa ha cambiado. No se aplica la confirmación a otra cartera.",
+            { phase: "session", code: "auth/account-changed" });
+        };
+        assertAccount();
+        const result = await commit(signal);
+        assertAccount();
+        return result;
+      }, signal));
+  };
 
   const persistPortfolio = (userId: string, s: AppState) => {
     // Se mide el JSON exacto que se escribirá (sin undefined, como en Firestore).
@@ -228,36 +253,37 @@ export default function App() {
     const legacyFirestoreWrite = () =>
       setDoc(userDocRef, { ...body, updatedAt: new Date().toISOString() }, { merge: true });
 
-    // ---- ALMACÉN REMOTO PROPIO (definitivo): entidades patrimoniales + movimientos ----
-    // La promesa solo se resuelve cuando el almacén ha CONFIRMADO la escritura. No hay
-    // guardado local silencioso ni éxito falso: si falla, el estado queda pendiente.
-    if (getVaultToken(userId)) {
-      syncPortfolioEntities(userId, body)
-        .then(() => vaultPutMovements(userId, (body.expenses ?? []) as PropertyExpense[]))
-        .then(() => {
-          confirmSaved();
-          // Espejo LEGADO best-effort: nunca bloquea ni decide el éxito (el remoto ya confirmó).
-          legacyFirestoreWrite().catch((err) => {
-            console.warn("[legacy] Espejo de Firestore fallido (el almacén remoto ya confirmó el guardado):", err);
-          });
-        })
-        .catch((err) => {
-          console.error("[vault] El almacén remoto no ha confirmado el guardado:", err);
-          const message = err instanceof Error && err.message
-            ? err.message
-            : "El almacén remoto no ha confirmado el guardado. Los cambios siguen en este navegador.";
-          confirmFailed(message);
+    // Nunca ejecutar una copia capturada antes/durante un commit de adjunto.
+    // Las escrituras ya iniciadas concluyen antes del commit individual y su readback.
+    const epoch = attachmentWritesRef.current.capture(userId);
+    const useVault = Boolean(getVaultToken(userId));
+    attachmentWritesRef.current.snapshot(userId, epoch, () => attachmentPhase("persistence", useVault ? "vault" : "firebase", ATTACHMENT_TIMEOUTS.persistence, async (signal) => {
+      if (currentUserRef.current !== userId) { settled = true; clearTimeout(slowTimer); return; }
+      if (useVault) {
+        await syncPortfolioEntities(userId, body, signal);
+        await vaultPutMovements(userId, (body.expenses ?? []) as PropertyExpense[], signal);
+        signal.throwIfAborted();
+        confirmSaved();
+        // Espejo legado no autoritativo: nunca bloquea la confirmación del Vault.
+        legacyFirestoreWrite().catch((err) => {
+          console.warn("[legacy] Espejo de Firestore fallido (el almacén remoto ya confirmó el guardado):", err);
         });
-      return;
-    }
-
-    // ---- LEGADO (sin sesión del almacén remoto): Firestore, modo degradado declarado ----
-    legacyFirestoreWrite()
-      .then(confirmSaved)
-      .catch((err) => {
+      } else {
+        await legacyFirestoreWrite();
+        signal.throwIfAborted();
+        confirmSaved();
+      }
+    })).then((written) => {
+      if (!written) { settled = true; clearTimeout(slowTimer); dirtyRef.current = true; }
+    }).catch((err) => {
+      if (useVault) {
+        console.error("[vault] El almacén remoto no ha confirmado el guardado:", err);
+        confirmFailed(err instanceof Error ? err.message : "El almacén remoto no ha confirmado el guardado.");
+      } else {
         handleFirestoreError(err, OperationType.WRITE, path);
         confirmFailed(describePersistenceError(err));
-      });
+      }
+    });
   };
 
   // Efecto de guardado: copia local siempre que cambie el estado; nube solo ante cambios locales.
@@ -286,9 +312,12 @@ export default function App() {
     const user = state.currentUser;
     if (!getVaultToken(user)) return;
     const movements = state.expenses ?? [];
+    const epoch = attachmentWritesRef.current.capture(user);
     if (vaultSyncTimerRef.current) clearTimeout(vaultSyncTimerRef.current);
     vaultSyncTimerRef.current = setTimeout(() => {
-      vaultPutMovements(user, movements).catch((err) => {
+      attachmentWritesRef.current.snapshot(user, epoch, () => attachmentPhase("persistence", "vault", ATTACHMENT_TIMEOUTS.persistence, async (signal) => {
+        if (currentUserRef.current === user) await vaultPutMovements(user, movements, signal);
+      })).catch((err) => {
         console.warn("[vault] Sincronización de movimientos en segundo plano fallida:", err);
       });
     }, 1500);
@@ -564,8 +593,19 @@ export default function App() {
   };
 
   // ADD PROPERTY
-  const handleAddProperty = (newProp: Property) => {
+  const handleAddProperty = (newProp: Property, attachments?: PendingAttachmentReference[]): void | Promise<void> => {
+    if (attachments?.length) {
+      if (!state.currentUser) return Promise.reject(new Error("No hay una sesión activa para confirmar el contrato."));
+      const owner = state.currentUser;
+      const properties = [...state.properties.filter((p) => p.id !== newProp.id), newProp];
+      return runAttachedCommit(owner, (signal) => persistAttachedProperty(owner, newProp, properties, attachments, undefined, signal)).then(() => {
+        handleAddProperty(newProp);
+        triggerNotification("✓ Inmueble y contrato confirmados en almacenamiento remoto.");
+      });
+    }
     updateState((prev) => {
+      if (prev.currentUser !== state.currentUser) return prev;
+      if (prev.properties.some((p) => p.id === newProp.id)) return prev;
       // Create payments for this new property
       const currentYear = 2026;
       const newPayments = MONTHS.map((m) => ({
@@ -593,8 +633,16 @@ export default function App() {
   };
 
   // EDIT PROPERTY
-  const handleEditProperty = (updatedProp: Property) => {
+  const handleEditProperty = (updatedProp: Property, attachments?: PendingAttachmentReference[]): void | Promise<void> => {
+    if (attachments?.length) {
+      if (!state.currentUser) return Promise.reject(new Error("No hay una sesión activa para confirmar el documento."));
+      return runAttachedCommit(state.currentUser, (signal) => persistAttachedProperty(state.currentUser, updatedProp, state.properties, attachments, undefined, signal)).then(() => {
+        handleEditProperty(updatedProp);
+        triggerNotification("✓ Documento verificado y asociado al inmueble en almacenamiento remoto.");
+      });
+    }
     updateState((prev) => {
+      if (prev.currentUser !== state.currentUser) return prev;
       // Actualizar la renta mensual en los cobros pendientes si se modificó
       const updatedPayments = prev.payments.map((p) => {
         if (p.propertyId === updatedProp.id && p.status === "pending") {
@@ -678,7 +726,16 @@ export default function App() {
   };
 
   // ADD EXPENSE OR INCOME
-  const handleAddExpense = (newExpense: PropertyExpense) => {
+  const handleAddExpense = (newExpense: PropertyExpense): void | Promise<void> => {
+    if (newExpense.receiptPath || newExpense.receiptVaultId) {
+      if (!state.currentUser) return Promise.reject(new Error("No hay una sesión activa para confirmar la factura."));
+      return runAttachedCommit(state.currentUser, (signal) => persistAttachedExpense(state.currentUser, newExpense, undefined, signal)).then((confirmed) => {
+        updateState((prev) => prev.currentUser !== state.currentUser ? prev : ({ ...prev, expenses: [...(prev.expenses || []).filter((e) => e.id !== confirmed.id), confirmed] }));
+        addSyncEvent("Gestión de Gastos", "Documentos patrimoniales", "Operación y comprobante confirmados",
+          `Referencia del comprobante asociada a la operación ${confirmed.id} y al inmueble ${confirmed.propertyId}.`);
+        triggerNotification(`✓ Operación y comprobante guardados en almacenamiento remoto: ${confirmed.amount}€`);
+      });
+    }
     const expenseWithStatus: PropertyExpense = {
       ...newExpense,
       status: "pending",
@@ -733,7 +790,14 @@ export default function App() {
   };
 
   // EDIT EXPENSE OR INCOME
-  const handleEditExpense = (updatedExpense: PropertyExpense) => {
+  const handleEditExpense = (updatedExpense: PropertyExpense): void | Promise<void> => {
+    if (updatedExpense.receiptPath || updatedExpense.receiptVaultId) {
+      if (!state.currentUser) return Promise.reject(new Error("No hay una sesión activa para confirmar el comprobante."));
+      return runAttachedCommit(state.currentUser, (signal) => persistAttachedExpense(state.currentUser, updatedExpense, undefined, signal)).then((confirmed) => {
+        updateState((prev) => prev.currentUser !== state.currentUser ? prev : ({ ...prev, expenses: (prev.expenses || []).map((e) => e.id === confirmed.id ? confirmed : e) }));
+        triggerNotification("✓ Modificación y comprobante confirmados en almacenamiento remoto.");
+      });
+    }
     const withStatus: PropertyExpense = {
       ...updatedExpense,
       status: "pending",
@@ -781,20 +845,11 @@ export default function App() {
   };
 
   // UPDATE RECEIPT REFERENCE OF AN EXISTING EXPENSE (functional update, no stale list)
-  const handleUpdateExpenseReceipt = (id: string, patch: Partial<PropertyExpense>) => {
-    updateState((prev) => ({
-      ...prev,
-      expenses: (prev.expenses || []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
-    }));
-
-    if (state.currentUser) {
-      const exp = (state.expenses || []).find((e) => e.id === id);
-      if (exp) {
-        saveMovement(state.currentUser, { ...exp, ...patch }).catch((err) => {
-          console.warn("Error persistiendo referencia de comprobante:", err);
-        });
-      }
-    }
+  const handleUpdateExpenseReceipt = (id: string, patch: Partial<PropertyExpense>): void | Promise<void> => {
+    const expense = (state.expenses || []).find((e) => e.id === id);
+    if (!expense) return Promise.reject(new Error("La operación no existe; el comprobante no se ha asociado."));
+    // La promesa vuelve al formulario/tabla: no se pierde el archivo al fallar la asociación.
+    return handleEditExpense({ ...expense, ...patch });
   };
 
   // DELETE EXPENSE
@@ -1145,25 +1200,28 @@ export default function App() {
     //    aplicación y reconciliación bidireccional idempotente de movimientos. Si el vault
     //    no está disponible, la app sigue funcionando en modo degradado (copia local).
     const localMovements: PropertyExpense[] = loadedState.expenses ?? [];
+    const loginEpoch = attachmentWritesRef.current.capture(username);
     vaultEnsureSession(username, password)
-      .then(async () => {
+      .then(() => attachmentWritesRef.current.snapshot(username, loginEpoch, () => attachmentPhase("persistence", "vault", ATTACHMENT_TIMEOUTS.persistence, async (signal) => {
+        if (currentUserRef.current !== username) return;
         let mergedMovementsForSeed: PropertyExpense[] = localMovements;
         try {
-          const remote = (await vaultGetMovements(username)) as PropertyExpense[];
+          const remote = (await vaultGetMovements(username, signal)) as PropertyExpense[];
           const merged = reconcileMovements(localMovements, remote);
           mergedMovementsForSeed = merged;
           // Externaliza al vault los comprobantes que quedaron en la COLA LOCAL (recibos
           // Base64 guardados cuando el remoto no estaba disponible). Mejor esfuerzo.
           try {
-            const flushed = await flushQueuedReceiptsToVault(username, merged);
+            const flushed = await flushQueuedReceiptsToVault(username, merged, signal);
             if (flushed > 0) {
               console.log(`[vault] Cola local: ${flushed} comprobante(s) externalizado(s) al almacenamiento remoto.`);
             }
           } catch (flushErr) {
             console.warn("[vault] No se pudieron externalizar los comprobantes en cola:", flushErr);
           }
+          signal.throwIfAborted();
           setState((prev) => (prev.currentUser === username ? { ...prev, expenses: merged } : prev));
-          await vaultPutMovements(username, merged);
+          await vaultPutMovements(username, merged, signal);
         } catch (err) {
           console.warn("[vault] Sincronización de movimientos en el login no completada:", err);
         }
@@ -1173,7 +1231,9 @@ export default function App() {
         // él; si no (cuenta nueva o primera migración desde el legado), se siembra con el
         // estado actual.
         try {
-          const remoteBody = await loadPortfolioEntities(username);
+          signal.throwIfAborted();
+          const remoteBody = await loadPortfolioEntities(username, signal);
+          signal.throwIfAborted();
           if (remoteBody) {
             vaultHydratedRef.current = true;
             setState((prev) => {
@@ -1194,13 +1254,13 @@ export default function App() {
             });
           } else {
             const seed = { ...loadedState, expenses: mergedMovementsForSeed };
-            await syncPortfolioEntities(username, portfolioBody(seed));
+            await syncPortfolioEntities(username, portfolioBody(seed), signal);
             console.log("[vault] Cartera sembrada en el almacén remoto (primera sincronización).");
           }
         } catch (err) {
           console.warn("[vault] Hidratación de entidades no completada:", err);
         }
-      })
+      })))
       .catch((err) => {
         console.warn("[vault] Sin sesión de almacenamiento remoto (modo degradado local):", err);
       });
@@ -1215,9 +1275,20 @@ export default function App() {
     triggerNotification("👤 Nueva cuenta registrada con éxito.");
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    if (logoutPendingRef.current) return;
     if (dirtyRef.current && !confirm("Hay cambios que NO se han guardado en la nube. Si cierras sesión ahora, solo quedarán en este navegador. ¿Cerrar sesión de todos modos?")) {
       return;
+    }
+    const owner = state.currentUser;
+    logoutPendingRef.current = true;
+    try {
+      if (owner) await vaultLogoutSession(owner);
+      if (auth.currentUser) await signOut(auth);
+    } catch (err) {
+      triggerNotification(err instanceof Error ? `No se ha confirmado el cierre de sesión: ${err.message}` : "No se ha confirmado el cierre de sesión.");
+      logoutPendingRef.current = false;
+      return; // no convertir fallo de revocación en logout aparentemente correcto
     }
     // Save current user state before clearing
     if (state.currentUser) {
@@ -1246,7 +1317,8 @@ export default function App() {
       registeredUsers: prev.registeredUsers
     }));
     
-    triggerNotification("🔒 Sesión cerrada correctamente.");
+    logoutPendingRef.current = false;
+    triggerNotification("🔒 Sesión cerrada y credencial revocada.");
   };
 
   const handleResetData = () => {

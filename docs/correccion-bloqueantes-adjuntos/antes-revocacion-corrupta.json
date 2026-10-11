@@ -1,0 +1,14 @@
+{
+  "phase": "before fail-closed corrupted-revocation refinement",
+  "exitCode": 1,
+  "cases": [
+    "not ok 1 - B26. Revocación ilegible/corrupta falla cerrado, no revalida una credencial retenida"
+  ],
+  "networkGuard": [
+    {
+      "testFile": "server/vault/attachmentBlockers.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

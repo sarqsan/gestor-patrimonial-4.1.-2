@@ -23,9 +23,9 @@ export interface PresignedPut {
 export interface BlobPort {
   readonly kind: string;
   head(pathname: string): Promise<BlobObjectInfo | null>;
-  getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string } | null>;
-  putBytes(pathname: string, bytes: Uint8Array, contentType: string): Promise<BlobObjectInfo>;
-  del(pathname: string): Promise<void>;
+  getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string; etag?: string } | null>;
+  putBytes(pathname: string, bytes: Uint8Array, contentType: string, options?: { allowOverwrite?: boolean; ifMatch?: string }): Promise<BlobObjectInfo>;
+  del(pathname: string, options?: { ifMatch?: string }): Promise<void>;
   list(prefix: string): Promise<BlobObjectInfo[]>;
   presignPut?(options: {
     pathname: string;
@@ -55,6 +55,12 @@ export interface VaultFileMeta {
   blobPathname?: string;
   /** Origen de la verificación del hash: el servidor siempre recalcula el suyo. */
   sha256VerifiedBy?: "server";
+  /** Resumen de la reserva directa. Interno: nunca sustituye la lectura/verificación del servidor. */
+  uploadSha256?: string;
+  /** Solo servidor: vínculo/reserva protegido antes de confirmar la operación. */
+  attachmentProtected?: boolean;
+  /** Retirada lógica por CAS; conserva bytes privados y no permite resucitar el ID. */
+  deletedAt?: string;
 }
 
 /**
@@ -74,6 +80,10 @@ export interface VaultEntityRecord {
   id: string;
   updatedAt: string;
   data: unknown;
+  /** ETag de transporte; nunca se incluye en el JSON persistido. */
+  version?: string;
+  /** Huellas técnicas de referencias reservadas; fuera de data y de los campos financieros. */
+  attachmentPins?: string[];
 }
 
 /** Evento de auditoría: solo identificadores y metadatos técnicos, nunca datos fiscales. */
@@ -99,6 +109,18 @@ export interface VaultAuditEvent {
 }
 
 /** Origen de datos del vault. Una sola interfaz para el almacén remoto y el modo local. */
+export interface VaultWriteOptions {
+  expectedVersion?: string;
+  validate?: (previous: any | null) => Promise<void>;
+}
+
+/** Registro técnico autorizado: sin token en claro ni modificación de credenciales. */
+export interface VaultSessionRevocation {
+  username: string;
+  tokenHash: string;
+  expiresAt: number;
+}
+
 export interface VaultPersistence {
   readonly driver: "vercel-blob" | "fs" | "unconfigured";
   /** `true` solo si el destino es remoto y persistente entre despliegues. */
@@ -107,16 +129,21 @@ export interface VaultPersistence {
 
   ensureSecret(): Promise<string>;
 
+  isSessionRevoked(username: string, tokenHash: string): Promise<boolean>;
+  revokeSession(record: VaultSessionRevocation): Promise<void>;
+
   getUser(username: string): Promise<VaultUserRecord | null>;
   createUser(username: string, record: VaultUserRecord): Promise<boolean>;
 
   getMovements(username: string): Promise<Record<string, any>[]>;
-  putMovements(username: string, movements: Record<string, any>[]): Promise<number>;
+  getMovement(username: string, id: string): Promise<{ data: Record<string, any>; version: string } | null>;
+  putMovements(username: string, movements: Record<string, any>[], options?: VaultWriteOptions): Promise<number>;
 
   /** Entidades estructuradas de la cartera (una por identificador, idempotentes). */
   listEntities(username: string, type: VaultEntityType): Promise<VaultEntityRecord[]>;
-  putEntity(username: string, type: VaultEntityType, id: string, data: unknown): Promise<VaultEntityRecord>;
-  deleteEntity(username: string, type: VaultEntityType, id: string): Promise<boolean>;
+  getEntity(username: string, type: VaultEntityType, id: string): Promise<VaultEntityRecord | null>;
+  putEntity(username: string, type: VaultEntityType, id: string, data: unknown, options?: VaultWriteOptions): Promise<VaultEntityRecord>;
+  deleteEntity(username: string, type: VaultEntityType, id: string, options?: VaultWriteOptions): Promise<boolean>;
 
   listFiles(username: string): Promise<VaultFileMeta[]>;
   getFileMeta(username: string, fileId: string): Promise<VaultFileMeta | null>;
@@ -124,7 +151,7 @@ export interface VaultPersistence {
   deleteFileMeta(username: string, fileId: string): Promise<boolean>;
 
   readFileBytes(username: string, fileId: string): Promise<Uint8Array | null>;
-  writeFileBytes(username: string, fileId: string, bytes: Uint8Array, contentType: string): Promise<void>;
+  writeFileBytes(username: string, fileId: string, bytes: Uint8Array, contentType: string, createOnly?: boolean): Promise<void>;
   deleteFileBytes(username: string, fileId: string): Promise<void>;
 
   createBackup(username: string, id: string, portfolio: unknown): Promise<{ id: string; createdAt: string; size: number }>;

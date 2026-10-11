@@ -1,0 +1,18 @@
+{
+  "command": "npm run lint",
+  "exitCode": 0,
+  "elapsedSeconds": 23.9,
+  "summary": [],
+  "networkGuard": [
+    {
+      "testFile": null,
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    },
+    {
+      "testFile": null,
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

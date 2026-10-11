@@ -30,6 +30,8 @@ export interface SessionClaims {
   iat: number;
   /** Expira en (ms epoch). */
   exp: number;
+  /** Aleatorio, evita que dos logins sean la misma sesión por compartir timestamp. */
+  sid?: string;
 }
 
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 días
@@ -46,14 +48,14 @@ function fromB64url(input: string): string {
 /** Crea un token de sesión firmado (HMAC-SHA256) para el usuario. */
 export function createSessionToken(secret: string, username: string, ttlMs: number = SESSION_TTL_MS): string {
   const now = Date.now();
-  const claims: SessionClaims = { sub: username, iat: now, exp: now + ttlMs };
+  const claims: SessionClaims = { sub: username, iat: now, exp: now + ttlMs, sid: randomBytes(16).toString("hex") };
   const payload = b64url(JSON.stringify(claims));
   const sig = createHmac("sha256", secret).update(payload).digest("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return `${payload}.${sig}`;
 }
 
 /** Verifica firma y caducidad. Devuelve el usuario o null. */
-export function verifySessionToken(secret: string, token: string): string | null {
+export function verifySessionClaims(secret: string, token: string): SessionClaims | null {
   if (typeof token !== "string") return null;
   const dot = token.lastIndexOf(".");
   if (dot <= 0) return null;
@@ -66,11 +68,15 @@ export function verifySessionToken(secret: string, token: string): string | null
   try {
     const claims = JSON.parse(fromB64url(payload)) as SessionClaims;
     if (typeof claims.sub !== "string" || !claims.sub) return null;
-    if (typeof claims.exp !== "number" || Date.now() > claims.exp) return null;
-    return claims.sub;
+    if (!Number.isFinite(claims.exp) || !Number.isFinite(claims.iat) || Date.now() >= claims.exp) return null;
+    return claims;
   } catch {
     return null;
   }
+}
+
+export function verifySessionToken(secret: string, token: string): string | null {
+  return verifySessionClaims(secret, token)?.sub ?? null;
 }
 
 /** Política de contraseñas mínima (coherente con AuthScreen: mínimo 4 caracteres). */

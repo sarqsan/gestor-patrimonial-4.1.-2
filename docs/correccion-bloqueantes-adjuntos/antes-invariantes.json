@@ -1,0 +1,134 @@
+{
+  "simulatedProvider": "MemoryBlobPort",
+  "remoteAcceptance": false,
+  "total": 14,
+  "passedInvariants": 6,
+  "failedInvariants": 8,
+  "outcomes": [
+    {
+      "id": "L01",
+      "invariant": "Descarga Vault sin credencial debe ser rechazada.",
+      "ok": true,
+      "observed": {
+        "status": 401
+      }
+    },
+    {
+      "id": "L02",
+      "invariant": "Otra cuenta no debe recuperar el documento de la cuenta propietaria.",
+      "ok": true,
+      "observed": {
+        "status": 404
+      }
+    },
+    {
+      "id": "L03",
+      "invariant": "Descarga autorizada e íntegra del objeto persistido SIMULADO.",
+      "ok": true,
+      "observed": {
+        "status": 200,
+        "sameBytes": true
+      }
+    },
+    {
+      "id": "L04",
+      "invariant": "El commit válido debe confirmar el mismo gasto/documento/inmueble.",
+      "ok": true,
+      "observed": {
+        "status": 200,
+        "associationMatches": true
+      }
+    },
+    {
+      "id": "L05",
+      "invariant": "Reintento por el mismo ID no duplica el objeto en servidor.",
+      "ok": true,
+      "observed": {
+        "status": 201,
+        "sameIdCount": 1
+      }
+    },
+    {
+      "id": "L06",
+      "invariant": "No confirmar un receiptPath inexistente/de otra cuenta confiando en el cliente.",
+      "ok": false,
+      "observed": {
+        "status": 200,
+        "storageOk": true
+      }
+    },
+    {
+      "id": "L07",
+      "invariant": "El padre patrimonial debe existir/estar autorizado en el remoto antes de confirmar asociación.",
+      "ok": false,
+      "observed": {
+        "status": 200,
+        "propertyExists": false
+      }
+    },
+    {
+      "id": "L08",
+      "invariant": "Una sincronización vieja no debe borrar la referencia de un comprobante confirmado.",
+      "ok": false,
+      "observed": {
+        "status": 200,
+        "confirmedReferenceRetained": false
+      }
+    },
+    {
+      "id": "L09",
+      "invariant": "Omitir attachmentIds no debe eludir verificación de referencias privadas ajenas.",
+      "ok": false,
+      "observed": {
+        "status": 201
+      }
+    },
+    {
+      "id": "L10",
+      "invariant": "Snapshot viejo de inmueble no debe desvincular un documento confirmado.",
+      "ok": false,
+      "observed": {
+        "status": 201,
+        "confirmedReferenceRetained": false
+      }
+    },
+    {
+      "id": "L11",
+      "invariant": "Logout debe invalidar una credencial conservada también en servidor, no solo borrar el navegador.",
+      "ok": false,
+      "observed": {
+        "clientCredentialRemoved": true,
+        "statusWithPreservedCredential": 200
+      }
+    },
+    {
+      "id": "L12",
+      "invariant": "Download normal rechaza bytes que no concuerdan con SHA almacenado.",
+      "ok": true,
+      "observed": {
+        "status": 502
+      }
+    },
+    {
+      "id": "L13",
+      "invariant": "ZIP fiscal debe aplicar la misma verificación de integridad que download individual.",
+      "ok": false,
+      "observed": {
+        "status": 200,
+        "containsAlteredBytes": true
+      }
+    },
+    {
+      "id": "L14",
+      "invariant": "Reintento legacy sin ID no debería crear dos objetos para el mismo archivo/intención.",
+      "ok": false,
+      "observed": {
+        "statuses": [
+          201,
+          201
+        ],
+        "sameObjectId": false
+      }
+    }
+  ]
+}

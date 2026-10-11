@@ -1,0 +1,33 @@
+{
+  "scope": "local synthetic only; network restricted to loopback",
+  "executed_at_utc": "2026-10-11T15:55:39.907959+00:00",
+  "groups": [
+    {
+      "index": 1,
+      "exit_code": 0,
+      "tests": 285,
+      "pass": 285,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "network_guard_processes": 24,
+      "external_fetch_blocked": 2,
+      "external_socket_blocked": 0
+    },
+    {
+      "index": 2,
+      "exit_code": 0,
+      "tests": 55,
+      "pass": 55,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "network_guard_processes": 7,
+      "external_fetch_blocked": 0,
+      "external_socket_blocked": 0
+    }
+  ],
+  "exit_code": 0
+}

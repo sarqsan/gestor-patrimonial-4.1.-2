@@ -149,7 +149,9 @@ test("reglas de Storage: adjuntos solo crear; nunca sobrescribir ni borrar", () 
 
 test("importación reutiliza objetos idénticos: ninguna ruta de adjuntos depende de sobrescribir", () => {
   const attachments = read("src/lib/attachments.ts");
-  assert.match(attachments, /storeVerifiedObject\(port/);
+  assert.match(attachments, /storeStorageAttachment\(activeStoragePort/);
+  assert.match(attachments, /getMetadata\(ref\(storage/);
+  assert.doesNotMatch(attachments, /getStorageBytes/, "no usar descargas de bytes como sonda de existencia");
   const migration = read("src/lib/portfolioMigrationRun.ts");
   // La migración lee antes de subir y nunca sube sobre un objeto existente.
   assert.match(migration, /const existing = await storage\.readBytes\(item\.storagePath\)/);

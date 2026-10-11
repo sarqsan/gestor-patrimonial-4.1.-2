@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   DIRECT_UPLOAD_THRESHOLD_BYTES,
   VaultUnavailableError,
+  type VaultCapabilities,
   vaultCapabilities,
   vaultUploadFileAuto,
   vaultUploadFileDirect,
@@ -16,6 +17,8 @@ import {
   __resetVaultCapabilitiesCacheForTests,
 } from "./vaultClient";
 import { AttachmentError, getAttachmentBlob, uploadAttachment } from "./attachments";
+import { verifiedVaultFetchFake } from "./attachmentTestFixtures";
+import { __setSignInDriverForTests } from "./firebase";
 import { receiptSource } from "./attachmentRules";
 
 function installLocalStorage(): Map<string, string> {
@@ -49,10 +52,12 @@ function jsonResponse(status: number, body: unknown) {
 
 test.beforeEach(() => {
   installLocalStorage();
+  __setSignInDriverForTests(async () => { throw Object.assign(new Error("Servicio Auth simulado no disponible"), { code: "auth/network-request-failed" }); });
   __resetVaultCapabilitiesCacheForTests();
 });
 
 test.afterEach(() => {
+  __setSignInDriverForTests(null);
   (globalThis as any).fetch = NATIVE_FETCH;
 });
 
@@ -115,63 +120,36 @@ test("C3. Almacén remoto caído (sin respuesta): error explícito y ninguna esc
 
 test("C4. La subida directa la usa el navegador solo con una firma acotada, y el servidor confirma el hash", async () => {
   storeVaultToken("ana", "tok-ana");
-  const calls: Array<{ url: string; method?: string; body?: any }> = [];
   const bytes = new Uint8Array([1, 2, 3, 4, 5]);
   const payload = new File([bytes], "grande.pdf", { type: "application/pdf" });
+  const fake = verifiedVaultFetchFake();
+  const calls = fake.calls;
+  (globalThis as any).fetch = fake.fetch;
 
-  (globalThis as any).fetch = async (url: string, init?: any) => {
-    calls.push({ url, method: init?.method, body: init?.body ? String(init.body).slice(0, 120) : undefined });
-    if (url === "/api/vault?op=files.presign") {
-      return jsonResponse(201, {
-        ok: true,
-        fileId: "file_directo_1",
-        upload: { url: "https://blob.invalid/vault/users/ana/contents/file_directo_1?sig=1", headers: { "content-type": "application/pdf" }, validUntil: Date.now() + 600000 },
-      });
-    }
-    if (String(url).startsWith("https://blob.invalid/")) {
-      return { ok: true, status: 200, json: async () => ({}) };
-    }
-    if (url === "/api/vault?op=files.commit&id=file_directo_1") {
-      return jsonResponse(200, { ok: true, file: { id: "file_directo_1", name: "grande.pdf", contentType: "application/pdf", size: 5, sha256: "abc" } });
-    }
-    throw new Error(`llamada inesperada: ${url}`);
-  };
-
-  const meta = await vaultUploadFileDirect({ username: "ana", file: payload, name: "grande.pdf", contentType: "application/pdf", movementId: "mov_1" });
+  const meta = await vaultUploadFileDirect({ username: "ana", fileId: "file_directo_1", file: payload, name: "grande.pdf", contentType: "application/pdf", movementId: "mov_1" });
   assert.equal(meta.id, "file_directo_1");
-  assert.equal(calls.length, 3, "firma → escritura directa en el almacén → confirmación");
+  assert.equal(calls.length, 4, "firma → escritura directa → commit → lectura/verificación del objeto");
   assert.equal(calls[0].url, "/api/vault?op=files.presign");
   assert.ok(String(calls[1].url).startsWith("https://blob.invalid/"), "el contenido no atraviesa la función serverless");
   assert.equal(calls[2].url, "/api/vault?op=files.commit&id=file_directo_1");
-  assert.match(String(calls[2].body), /"sha256":"[0-9a-f]+"/, "la confirmación incluye el hash calculado en el navegador");
+  assert.equal(calls[3].url, "/api/vault?op=files.verify&id=file_directo_1");
+  assert.match(String(calls[2].init.body), /"sha256":"[0-9a-f]+"/, "la confirmación incluye el hash calculado en el navegador");
   assert.ok(!JSON.stringify(calls).includes("BLOB_READ_WRITE_TOKEN"), "no se maneja ninguna credencial del almacén");
 });
 
 test("C5. El transporte se elige por tamaño: pequeño por JSON, grande por subida directa", async () => {
   storeVaultToken("ana", "tok-ana");
+  const caps = HEALTH_OK as unknown as VaultCapabilities;
+  const fake = verifiedVaultFetchFake();
+  (globalThis as any).fetch = fake.fetch;
   const usedPaths: string[] = [];
-  (globalThis as any).fetch = async (url: string, init?: any) => {
-    usedPaths.push(url);
-    if (url === "/api/vault?op=files.upload") {
-      return jsonResponse(201, { ok: true, file: { id: "file_json", name: "p.pdf", contentType: "application/pdf", size: 4, sha256: "h" } });
-    }
-    if (url === "/api/vault?op=files.presign") {
-      return jsonResponse(201, { ok: true, fileId: "file_grande", upload: { url: "https://blob.invalid/x", headers: {}, validUntil: Date.now() + 600000 } });
-    }
-    if (String(url).startsWith("https://blob.invalid/")) return { ok: true, status: 200, json: async () => ({}) };
-    if (url === "/api/vault?op=files.commit&id=file_grande") {
-      return jsonResponse(200, { ok: true, file: { id: "file_grande", name: "g.pdf", contentType: "application/pdf", size: 4, sha256: "h" } });
-    }
-    throw new Error(`llamada inesperada: ${url}`);
-  };
-
-  const caps = { ...HEALTH_OK };
+  (globalThis as any).fetch = async (url: any, init: any) => { usedPaths.push(String(url)); return fake.fetch(url, init); };
   const small = new File([new Uint8Array([1, 2, 3, 4])], "p.pdf", { type: "application/pdf" });
-  const r1 = await vaultUploadFileAuto({ username: "ana", file: small, name: "p.pdf", contentType: "application/pdf", capabilities: caps });
+  const r1 = await vaultUploadFileAuto({ username: "ana", fileId: "file_json", file: small, name: "p.pdf", contentType: "application/pdf", capabilities: caps });
   assert.equal(r1.id, "file_json");
 
   const big = new File([new Uint8Array(DIRECT_UPLOAD_THRESHOLD_BYTES + 1)], "g.pdf", { type: "application/pdf" });
-  const r2 = await vaultUploadFileAuto({ username: "ana", file: big, name: "g.pdf", contentType: "application/pdf", capabilities: caps });
+  const r2 = await vaultUploadFileAuto({ username: "ana", fileId: "file_grande", file: big, name: "g.pdf", contentType: "application/pdf", capabilities: caps });
   assert.equal(r2.id, "file_grande");
   assert.ok(usedPaths.includes("/api/vault?op=files.upload"), "el archivo pequeño usa la vía JSON");
   assert.ok(usedPaths.includes("/api/vault?op=files.presign"), "el archivo grande usa la vía directa");
@@ -187,8 +165,8 @@ test("C6. La firma caducada o rechazada por el almacén no se declara como guard
     return jsonResponse(500, {});
   };
   await assert.rejects(
-    () => vaultUploadFileDirect({ username: "ana", file: new File([new Uint8Array([1])], "x.pdf", { type: "application/pdf" }), name: "x.pdf", contentType: "application/pdf" }),
-    /no se ha guardado/i
+    () => vaultUploadFileDirect({ username: "ana", fileId: "file_x", file: new File([new Uint8Array([1])], "x.pdf", { type: "application/pdf" }), name: "x.pdf", contentType: "application/pdf" }),
+    (err: any) => err instanceof AttachmentError && err.phase === "upload" && err.code === "vault/http-403" && !err.retryable
   );
 });
 
@@ -213,5 +191,5 @@ test("C9. El error de destino no disponible es reconocible como tal (no un fallo
   (globalThis as any).fetch = async () => {
     throw new Error("red caída");
   };
-  await assert.rejects(() => vaultCapabilities(true), (err: any) => err instanceof VaultUnavailableError);
+  await assert.rejects(() => vaultCapabilities(true), (err: any) => err instanceof AttachmentError && err.phase === "preflight" && err.code === "vault/network-unavailable" && err.cause instanceof VaultUnavailableError);
 });

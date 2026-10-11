@@ -1,0 +1,11 @@
+{
+  "typecheck": {
+    "exit_code": 0,
+    "diagnostics": []
+  },
+  "build": {
+    "exit_code": 0,
+    "vite_modules": "\u2713 2312 modules transformed.",
+    "chunk_size_warning": true
+  }
+}

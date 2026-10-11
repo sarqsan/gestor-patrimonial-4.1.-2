@@ -1,0 +1,15 @@
+{
+  "scope": "supplementary ZIP property-document association; memory only",
+  "phase": "before ZIP-link refinement",
+  "exitCode": 1,
+  "cases": [
+    "not ok 1 - B25. ZIP rechaza fichero con metadatos válidos cuyo documento ya no figura en su inmueble"
+  ],
+  "networkGuard": [
+    {
+      "testFile": "server/vault/attachmentBlockers.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

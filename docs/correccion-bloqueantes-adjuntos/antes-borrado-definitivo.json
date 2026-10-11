@@ -1,0 +1,15 @@
+{
+  "scope": "supplementary definitive-file retention; memory/loopback only",
+  "phase": "before safe HTTP delete guard",
+  "exitCode": 1,
+  "cases": [
+    "not ok 1 - B27. Borrado HTTP de objeto definitivo no deja una referencia confirmada colgante"
+  ],
+  "networkGuard": [
+    {
+      "testFile": "server/vault/attachmentBlockers.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

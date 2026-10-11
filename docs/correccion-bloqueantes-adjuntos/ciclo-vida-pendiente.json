@@ -1,0 +1,16 @@
+{
+  "case": "CICLO-01",
+  "invariant": "Un borrado de padre prevalidado no debe destruirlo tras un commit de adjunto concurrente confirmado en otra instancia",
+  "ok": false,
+  "isolatedSimulation": true,
+  "instances": 2,
+  "remoteAcceptance": false,
+  "observed": {
+    "commitStatus": 200,
+    "deletionStatus": 204,
+    "parentReadStatus": 404,
+    "movementReadStatus": 200,
+    "confirmedReferenceRetained": true
+  },
+  "consequence": "STOP: atomicidad CAS por objeto no basta; autorización independiente de ciclo de vida/transacciones necesaria"
+}

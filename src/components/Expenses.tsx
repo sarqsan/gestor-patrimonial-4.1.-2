@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Property, PropertyExpense } from "../types";
 import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId, receiptSource, AttachmentSource, hasAttachmentSource } from "../lib/attachmentRules";
-import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, getAttachmentBlob, downloadAttachment, expenseReceiptFieldsFromStored, StoredAttachment } from "../lib/attachments";
 import { externalizeImportedExpenses } from "../lib/importAttachments";
 import { extractYearFromDate, normalizeDateToIso, isDateOlderThanYears } from "../lib/dateUtils";
 import {
@@ -57,11 +57,11 @@ import {
 interface ExpensesProps {
   properties: Property[];
   expenses: PropertyExpense[];
-  onAddExpense: (newExpense: PropertyExpense) => void;
-  onEditExpense?: (updatedExpense: PropertyExpense) => void;
+  onAddExpense: (newExpense: PropertyExpense) => void | Promise<void>;
+  onEditExpense?: (updatedExpense: PropertyExpense) => void | Promise<void>;
   onDeleteExpense: (id: string) => void;
   onImportExpenses?: (newExpenses: PropertyExpense[], mode: 'merge' | 'replace') => Promise<{ ok: boolean; savedCount?: number; errors?: string[] } | void> | void;
-  onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void;
+  onUpdateExpenseReceipt?: (id: string, patch: Partial<PropertyExpense>) => void | Promise<void>;
   currentUser?: string;
   user1Name: string;
   currentYear?: number;
@@ -151,34 +151,36 @@ export default function Expenses({
   const [pendingReceiptFile, setPendingReceiptFile] = useState<File | null>(null);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const [isSavingExpense, setIsSavingExpense] = useState(false);
+  const savingExpenseRef = useRef(false); // también bloquea dos eventos antes del próximo render
+  const draftExpenseIdRef = useRef<string | null>(null);
+  const uploadedReceiptRef = useRef<{ file: File; propertyId: string; movementId: string; stored: StoredAttachment } | null>(null);
+  const directUploadRef = useRef(new Map<string, { file: File; propertyId: string; stored: StoredAttachment }>());
+  const directBusyRef = useRef(new Set<string>());
+  const receiptPreviewRequestRef = useRef(0);
+  const [directRetry, setDirectRetry] = useState<{ expenseId: string; file: File; error: string } | null>(null);
+  const [directAttaching, setDirectAttaching] = useState(false);
 
-  // Visor: resuelve la URL de vista previa (Storage) o usa la existente (histórico / previsualización)
+  // Visor: bytes autorizados y URL solo de este navegador, nunca una URL de token permanente.
   const [viewerSrc, setViewerSrc] = useState<string | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [viewerLoading, setViewerLoading] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    let objectUrl: string | undefined;
     setViewerSrc(null);
     setViewerError(null);
     const exp = selectedReceiptExpense;
     if (!exp) return;
-    if (exp.receiptVaultId) {
-      // Almacenamiento remoto propio: descarga autorizada y URL local para el visor.
+    if (exp.receiptVaultId || exp.receiptPath) {
       setViewerLoading(true);
-      getAttachmentBlob({ vaultId: exp.receiptVaultId })
-        .then((blob) => { if (!cancelled) setViewerSrc(URL.createObjectURL(blob)); })
-        .catch((err) => { if (!cancelled) setViewerError(err instanceof Error ? err.message : "No se pudo cargar el comprobante."); })
-        .finally(() => { if (!cancelled) setViewerLoading(false); });
-    } else if (exp.receiptPath) {
-      setViewerLoading(true);
-      getAttachmentPreviewUrl(exp.receiptPath)
-        .then((url) => { if (!cancelled) setViewerSrc(url); })
+      getAttachmentBlob(receiptSource(exp))
+        .then((blob) => { if (!cancelled) { objectUrl = URL.createObjectURL(blob); setViewerSrc(objectUrl); } })
         .catch((err) => { if (!cancelled) setViewerError(err instanceof Error ? err.message : "No se pudo cargar el comprobante."); })
         .finally(() => { if (!cancelled) setViewerLoading(false); });
     } else if (exp.receiptUrl) {
       setViewerSrc(exp.receiptUrl);
     }
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [selectedReceiptExpense]);
 
   // File Upload Handler for Form (solo selección y previsualización; la subida ocurre al guardar)
@@ -193,6 +195,7 @@ export default function Expenses({
       return;
     }
 
+    receiptPreviewRequestRef.current++;
     if (receiptUrl?.startsWith("blob:")) URL.revokeObjectURL(receiptUrl);
     setPendingReceiptFile(file);
     setReceiptUrl(URL.createObjectURL(file));
@@ -203,6 +206,7 @@ export default function Expenses({
   };
 
   const handleRemoveReceipt = () => {
+    receiptPreviewRequestRef.current++;
     if (receiptUrl?.startsWith("blob:")) URL.revokeObjectURL(receiptUrl);
     setPendingReceiptFile(null);
     setReceiptUrl(undefined);
@@ -210,34 +214,39 @@ export default function Expenses({
     setReceiptType(undefined);
   };
 
-  // Attach from the table: sube a Storage y actualiza solo ese gasto (sin reemplazar la lista completa)
+  // Adjuntar a un movimiento existente: conserva el File y la referencia si la asociación falla.
+  const saveDirectReceipt = async (expenseId: string, file: File) => {
+    if (directBusyRef.current.has(expenseId)) return;
+    const expense = expenses.find((e) => e.id === expenseId);
+    if (!currentUser || !onUpdateExpenseReceipt || !expense) {
+      setDirectRetry({ expenseId, file, error: "No hay una sesión u operación válida para asociar el comprobante." });
+      return;
+    }
+    directBusyRef.current.add(expenseId);
+    setDirectAttaching(true);
+    try {
+      const cached = directUploadRef.current.get(expenseId);
+      const stored = cached?.file === file && cached.propertyId === expense.propertyId ? cached.stored : await uploadAttachment({
+        userId: currentUser, folder: "expenses", file, movementId: expenseId, propertyId: expense.propertyId,
+      });
+      directUploadRef.current.set(expenseId, { file, propertyId: expense.propertyId, stored });
+      await onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
+      directUploadRef.current.delete(expenseId);
+      setDirectRetry((prev) => prev?.expenseId === expenseId ? null : prev);
+    } catch (err) {
+      setDirectRetry({ expenseId, file, error: err instanceof Error ? err.message : "No se pudo confirmar el comprobante." });
+    } finally {
+      directBusyRef.current.delete(expenseId);
+      setDirectAttaching(false);
+    }
+  };
   const handleDirectAttachReceipt = async (expenseId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-
     const invalid = validateAttachment(file);
-    if (invalid) {
-      alert(invalid);
-      return;
-    }
-    if (!currentUser || !onUpdateExpenseReceipt) {
-      alert("No se puede adjuntar el comprobante: no hay una sesión activa.");
-      return;
-    }
-    try {
-      // Identificador nuevo en cada subida: nunca se sobrescribe el comprobante anterior.
-      const stored = await uploadAttachment({
-        userId: currentUser,
-        folder: "expenses",
-        file,
-        attachmentId: newAttachmentId("rcpt"),
-        movementId: expenseId,
-      });
-      onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "No se pudo subir el comprobante.");
-    }
+    if (invalid) { alert(invalid); return; }
+    await saveDirectReceipt(expenseId, file);
   };
 
   const handleDownloadReceipt = async (exp: PropertyExpense) => {
@@ -520,6 +529,9 @@ export default function Expenses({
   };
 
   const resetForm = () => {
+    receiptPreviewRequestRef.current++;
+    draftExpenseIdRef.current = null;
+    uploadedReceiptRef.current = null;
     setEditingExpense(null);
     setPropertyId(properties[0]?.id || "");
     setOpType("gasto");
@@ -560,13 +572,13 @@ export default function Expenses({
     const source = receiptSource(exp);
     setExistingReceiptRef(source);
     if (source.inlineData) setReceiptUrl(source.inlineData);
-    else if (source.storagePath) setReceiptUrl(source.storagePath);
-    else if (source.vaultId) {
+    else if (source.storagePath || source.vaultId) {
       setReceiptUrl(REMOTE_RECEIPT_PLACEHOLDER);
-      // Previsualización local bajo demanda; si falla, se conserva la marca de comprobante existente.
-      getAttachmentBlob({ vaultId: source.vaultId })
-        .then((blob) => setReceiptUrl(URL.createObjectURL(blob)))
-        .catch(() => undefined);
+      const previewRequest = receiptPreviewRequestRef.current;
+      getAttachmentBlob(source)
+        .then((blob) => { if (previewRequest === receiptPreviewRequestRef.current) setReceiptUrl(URL.createObjectURL(blob)); })
+        .catch((err) => { if (previewRequest === receiptPreviewRequestRef.current) setReceiptError(
+          `No se pudo cargar la vista previa; la referencia original se conserva. ${err instanceof Error ? err.message : ""}`); });
     }
     if (exp.receiptName) setReceiptName(exp.receiptName);
     if (exp.receiptType) setReceiptType(exp.receiptType);
@@ -575,7 +587,7 @@ export default function Expenses({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSavingExpense) return;
+    if (savingExpenseRef.current) return;
     if (!propertyId) {
       setError("Por favor, selecciona una propiedad.");
       return;
@@ -591,68 +603,38 @@ export default function Expenses({
     }
 
     const finalCategory = opType === "ingreso" ? "rent" : category;
-    const expenseId = `exp_${Date.now()}`;
-
-    // Si hay comprobante, primero se sube a Storage. Si falla, el formulario se mantiene con los datos.
-    let receiptFields: Partial<PropertyExpense> = {};
-    if (pendingReceiptFile) {
-      if (!currentUser) {
-        setReceiptError("No hay una sesión activa para guardar el comprobante.");
-        return;
-      }
-      setIsSavingExpense(true);
-      setReceiptError(null);
-      try {
-        const stored = await uploadAttachment({
-          userId: currentUser,
-          folder: "expenses",
-          file: pendingReceiptFile,
-          attachmentId: newAttachmentId("rcpt"),
-          movementId: editingExpense?.id ?? expenseId,
-        });
+    const expenseId = editingExpense?.id ?? (draftExpenseIdRef.current ??= newAttachmentId("exp"));
+    savingExpenseRef.current = true;
+    setIsSavingExpense(true);
+    setReceiptError(null);
+    try {
+      let receiptFields: Partial<PropertyExpense> = {};
+      if (pendingReceiptFile) {
+        if (!currentUser) throw new Error("No hay una sesión activa para guardar el comprobante.");
+        const cached = uploadedReceiptRef.current;
+        const stored = cached?.file === pendingReceiptFile && cached.propertyId === propertyId && cached.movementId === expenseId
+          ? cached.stored : await uploadAttachment({
+            userId: currentUser, folder: "expenses", file: pendingReceiptFile, movementId: expenseId, propertyId,
+          });
+        uploadedReceiptRef.current = { file: pendingReceiptFile, propertyId, movementId: expenseId, stored };
         receiptFields = expenseReceiptFieldsFromStored(stored);
-      } catch (err) {
-        setIsSavingExpense(false);
-        setReceiptError(err instanceof Error ? err.message : "No se pudo subir el comprobante. La operación no se ha guardado.");
-        return;
       }
+      const operation: PropertyExpense = {
+        ...(editingExpense ?? {}), id: expenseId, propertyId, category: finalCategory, type: opType,
+        amount: parsedAmount, date: normalizeDateToIso(date) || date,
+        description: description.trim() || undefined, ...receiptFields,
+      };
+      // Esperar la asociación/persistencia definitiva. Si falla, NO cerrar, resetear ni generar otro ID.
+      if (editingExpense && onEditExpense) await onEditExpense(operation);
+      else await onAddExpense(operation);
+      setIsAdding(false);
+      resetForm();
+    } catch (err) {
+      setReceiptError(err instanceof Error ? err.message : "No se pudo confirmar la operación. Los datos se conservan para reintentar.");
+    } finally {
+      savingExpenseRef.current = false;
       setIsSavingExpense(false);
     }
-
-    if (editingExpense) {
-      const updatedExpense: PropertyExpense = {
-        ...editingExpense,
-        propertyId,
-        category: finalCategory,
-        type: opType,
-        amount: parsedAmount,
-        date: normalizeDateToIso(date) || date,
-        description: description.trim() || undefined,
-        ...receiptFields,
-      };
-
-      if (onEditExpense) {
-        onEditExpense(updatedExpense);
-      } else {
-        onAddExpense(updatedExpense);
-      }
-    } else {
-      const newExpense: PropertyExpense = {
-        id: expenseId,
-        propertyId,
-        category: finalCategory,
-        type: opType,
-        amount: parsedAmount,
-        date: normalizeDateToIso(date) || date,
-        description: description.trim() || undefined,
-        ...receiptFields,
-      };
-
-      onAddExpense(newExpense);
-    }
-
-    setIsAdding(false);
-    resetForm();
   };
 
   // Get localized categories
@@ -794,6 +776,15 @@ export default function Expenses({
         )}
       </div>
 
+      {directRetry && (
+        <div role="alert" className="rounded-xl border border-amber-500/40 bg-amber-950/20 p-4 text-sm text-amber-200">
+          <p>{directRetry.error}</p>
+          <p className="mt-1">Se conserva {directRetry.file.name} para reintentar la misma asociación.</p>
+          <button type="button" disabled={directAttaching} className="mt-2 font-semibold underline disabled:opacity-50"
+            onClick={() => saveDirectReceipt(directRetry.expenseId, directRetry.file)}>Reintentar adjunto</button>
+        </div>
+      )}
+
       {/* SUB-TAB NAVIGATION */}
       {!isAdding && (
         <div className="flex border-b border-slate-800/80 gap-6">
@@ -884,6 +875,7 @@ export default function Expenses({
       {/* FORM: ADD TRANSACTION */}
       {isAdding && (
         <form onSubmit={handleSubmit} className="bg-slate-900/40 border border-slate-700/50 rounded-2xl p-6 shadow-2xl animate-slide-in text-left">
+          <fieldset disabled={isSavingExpense} className="contents">
           <h3 className="text-md font-bold text-white flex items-center mb-6">
             <Receipt className="w-5 h-5 text-indigo-400 mr-2" />
             <span>{editingExpense ? `Editar Operación Contable (${editingExpense.id})` : "Registrar Nueva Operación Contable"}</span>
@@ -1119,7 +1111,7 @@ export default function Expenses({
           <div className="mt-8 flex justify-end space-x-3 border-t border-slate-800 pt-5">
             <button
               type="button"
-              onClick={() => setIsAdding(false)}
+              onClick={() => { setIsAdding(false); resetForm(); }}
               className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-xs transition-colors cursor-pointer"
             >
               Cancelar
@@ -1132,6 +1124,7 @@ export default function Expenses({
               {isSavingExpense ? "Subiendo comprobante…" : editingExpense ? "Guardar Cambios" : "Guardar Operación"}
             </button>
           </div>
+          </fieldset>
         </form>
       )}
 

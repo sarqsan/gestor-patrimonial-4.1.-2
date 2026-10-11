@@ -9,7 +9,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test src/lib/attachments.test.ts src/lib/attachmentSources.test.ts src/lib/apiResponse.test.ts src/lib/apiRoutes.test.ts src/lib/importParsers.test.ts src/lib/portfolioMigration.test.ts src/lib/portfolioGuard.test.ts src/lib/portfolioMigrationRun.test.ts src/lib/migrationWiring.test.ts src/lib/verifiedObjectStore.test.ts src/lib/expensesPersistence.test.ts src/lib/dateUtils.test.ts src/lib/recoveryImport.test.ts src/lib/movementService.test.ts src/lib/firebaseAuthAndUpload.test.ts src/lib/adminRestrictedOperation.test.ts src/lib/vaultClient.test.ts src/lib/remotePersistence.test.ts src/lib/attachmentsVault.test.ts src/lib/portfolioRemote.test.ts && node --import tsx --test server/vault/vault.test.ts server/vault/persistenceBlob.test.ts server/vault/importProcedure.test.ts server/vault/routingCompatibility.test.ts server/vault/entities.test.ts server/vault/patrimonialIntegration.test.ts"
+    "test": "node --import ./docs/auditoria-adjuntos/solo-red-local.mjs --import tsx --test src/lib/attachments.test.ts src/lib/storageAttachment.test.ts src/lib/attachmentPersistence.test.ts src/lib/attachmentWriteCoordinator.test.ts src/lib/attachmentForms.test.tsx src/lib/attachmentSources.test.ts src/lib/apiResponse.test.ts src/lib/apiRoutes.test.ts src/lib/importParsers.test.ts src/lib/portfolioMigration.test.ts src/lib/portfolioGuard.test.ts src/lib/portfolioMigrationRun.test.ts src/lib/migrationWiring.test.ts src/lib/verifiedObjectStore.test.ts src/lib/expensesPersistence.test.ts src/lib/dateUtils.test.ts src/lib/recoveryImport.test.ts src/lib/movementService.test.ts src/lib/firebaseAuthAndUpload.test.ts src/lib/adminRestrictedOperation.test.ts src/lib/vaultClient.test.ts src/lib/remotePersistence.test.ts src/lib/attachmentsVault.test.ts src/lib/portfolioRemote.test.ts && node --import ./docs/auditoria-adjuntos/solo-red-local.mjs --import tsx --test server/vault/vault.test.ts server/vault/attachmentFlow.test.ts server/vault/attachmentBlockers.test.ts server/vault/persistenceBlob.test.ts server/vault/importProcedure.test.ts server/vault/routingCompatibility.test.ts server/vault/entities.test.ts server/vault/patrimonialIntegration.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -25,14 +25,18 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "recharts": "^3.9.1",
+    "spark-md5": "^3.0.2",
     "vite": "^6.2.3",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
+    "@types/react-test-renderer": "^19.3.0",
+    "@types/spark-md5": "^3.0.5",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "react-test-renderer": "19.2.7",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

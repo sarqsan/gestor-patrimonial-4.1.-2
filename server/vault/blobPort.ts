@@ -41,21 +41,22 @@ export class VercelBlobPort implements BlobPort {
     }
   }
 
-  async getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+  async getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string; etag?: string } | null> {
     const { get } = await this.sdk();
     const result = await get(pathname, { access: "private", useCache: false });
     if (!result || result.statusCode !== 200 || !result.stream) return null;
     const bytes = new Uint8Array(await new Response(result.stream).arrayBuffer());
-    return { bytes, contentType: result.blob.contentType || "application/octet-stream" };
+    return { bytes, contentType: result.blob.contentType || "application/octet-stream", etag: result.blob.etag };
   }
 
-  async putBytes(pathname: string, bytes: Uint8Array, contentType: string): Promise<BlobObjectInfo> {
+  async putBytes(pathname: string, bytes: Uint8Array, contentType: string, options?: { allowOverwrite?: boolean; ifMatch?: string }): Promise<BlobObjectInfo> {
     const { put } = await this.sdk();
     const result = await put(pathname, Buffer.from(bytes), {
       access: "private",
       addRandomSuffix: false,
-      allowOverwrite: true,
+      allowOverwrite: options?.allowOverwrite ?? true,
       contentType,
+      ...(options?.ifMatch ? { ifMatch: options.ifMatch } : {}),
     });
     return {
       pathname: result.pathname,
@@ -65,10 +66,10 @@ export class VercelBlobPort implements BlobPort {
     };
   }
 
-  async del(pathname: string): Promise<void> {
+  async del(pathname: string, options?: { ifMatch?: string }): Promise<void> {
     const { del } = await this.sdk();
     try {
-      await del(pathname);
+      await del(pathname, options?.ifMatch ? { ifMatch: options.ifMatch } : undefined);
     } catch (err) {
       // Un objeto ya ausente no es un error para el llamador (borrado idempotente).
       if ((err as { name?: string })?.name !== "BlobNotFoundError") throw err;

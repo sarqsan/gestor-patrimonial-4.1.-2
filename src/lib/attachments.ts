@@ -1,18 +1,20 @@
-// Firebase Storage operations for attachments.
-// New attachments are stored in Storage and referenced from Firestore by storagePath only.
+// Adjuntos remotos verificados (Vault privado o Firebase Storage por referencia estable).
+// Nunca se considera definitivo un archivo que solo existe en el navegador.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
-import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
-import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError, isTransientNetworkAuthError } from "./firebase";
+import { ref, uploadBytesResumable, getMetadata, getBlob } from "firebase/storage";
+import { storage, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError, isTransientNetworkAuthError } from "./firebase";
 import {
   AttachmentFolder,
   attachmentStoragePath,
   isInlineDataUrl,
-  newAttachmentId,
   resolveContentType,
   validateAttachment,
   MAX_ATTACHMENT_BYTES,
 } from "./attachmentRules";
-import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./verifiedObjectStore";
+import { storeStorageAttachment, StorageAttachmentPort } from "./storageAttachment";
+import { AttachmentError, attachmentFailure, attachmentPhase, ATTACHMENT_TIMEOUTS, logAttachmentFailure } from "./attachmentErrors";
+import { sha256Hex, utf8Bytes } from "./stableHash";
+export { AttachmentError } from "./attachmentErrors";
 import {
   VaultAuthError,
   VaultError,
@@ -24,10 +26,9 @@ import {
   vaultDownloadFile,
   vaultUnavailableMessage,
   vaultUploadFileAuto,
+  vaultVerifyFile,
 } from "./vaultClient";
 import type { PropertyExpense } from "../types";
-
-export class AttachmentError extends Error {}
 
 /**
  * Fallo de sesión por restricción ADMINISTRATIVA del proyecto Firebase
@@ -35,38 +36,19 @@ export class AttachmentError extends Error {}
  */
 export class AdminRestrictedAttachmentError extends AttachmentError {}
 
-const AUTH_TIMEOUT_MS = 15_000;
-const UPLOAD_TIMEOUT_MS = 60_000;
-
-/** Evita esperas indefinidas (p. ej. sin red): si no responde a tiempo, el error es visible. */
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new AttachmentError(message)), ms);
-    promise.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (err) => { clearTimeout(timer); reject(err); }
-    );
-  });
-}
-
 async function ensureSignedIn(): Promise<void> {
   if (auth?.currentUser) {
     return;
   }
 
   try {
-    await withTimeout(
-      ensureFirebaseAuth(),
-      AUTH_TIMEOUT_MS,
-      "No se ha podido conectar con Firebase (tiempo de espera agotado). Comprueba la conexión e inténtalo de nuevo."
-    );
+    await attachmentPhase("session", "firebase", ATTACHMENT_TIMEOUTS.session, () => ensureFirebaseAuth());
   } catch (err: any) {
-    if (err instanceof AttachmentError) {
-      throw err;
-    }
-    const code = err?.code || "";
-    const detail = describeAuthError(err);
-    if (isAdministrativeAuthError(err)) {
+    if (err instanceof AttachmentError && err.code === "attachment/timeout") throw err;
+    const original = err instanceof AttachmentError && err.cause ? err.cause : err;
+    const code = original?.code || "";
+    const detail = describeAuthError(original);
+    if (isAdministrativeAuthError(original)) {
       // Rechazo administrativo del servicio (p. ej. auth/admin-restricted-operation):
       // NO es un fallo transitorio de red y ningún reintento de cliente puede resolverlo.
       // Se comunica como bloqueo de configuración del proyecto Firebase, sin confundirlo
@@ -75,13 +57,14 @@ async function ensureSignedIn(): Promise<void> {
         `Firebase Auth ha rechazado la sesión por una restricción administrativa del proyecto Firebase ` +
           `(${code}: ${detail}). Este bloqueo no puede resolverse desde la ` +
           `aplicación: requiere revisar la configuración de Authentication/Identity Platform del proyecto ` +
-          `en la consola de Firebase.`
+          `en la consola de Firebase.`,
+        { phase: "session", backend: "firebase", code, cause: original }
       );
     }
     const msg = code
       ? `No se ha podido iniciar la sesión anónima de Firebase (${code}: ${detail}); el archivo no se ha subido.`
       : `No se ha podido iniciar la sesión anónima de Firebase (${detail}); el archivo no se ha subido.`;
-    throw new AttachmentError(msg);
+    throw new AttachmentError(msg, { phase: "session", backend: "firebase", code, cause: original, retryable: isTransientNetworkAuthError(original) });
   }
 }
 
@@ -107,7 +90,7 @@ export interface StoredAttachment {
 /**
  * Campos de comprobante de operación a partir del resultado de una subida.
  * Cada modo escribe SU referencia y limpia las demás para no mezclar orígenes:
- * vault → receiptVaultId; Storage → receiptPath; cola local → receiptUrl (legado).
+ * vault → receiptVaultId; Storage → receiptPath. Inline solo para lectura del legado.
  */
 export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partial<PropertyExpense> {
   if (stored.mode === "vault") {
@@ -150,11 +133,7 @@ export function describeStorageError(err: unknown): string {
 }
 
 /**
- * Sube un adjunto nuevo a users/{usuario}/attachments/{carpeta}/{id}/{nombre}.
- * Lanza AttachmentError con un mensaje visible si la validación o la subida fallan.
- */
-/**
- * ¿Firebase Storage es realmente utilizable ahora mismo? Comprueba la sesión y, ante un
+ * Comprueba SOLO la sesión Firebase, no los permisos de Storage/Firestore. Ante un
  * rechazo administrativo del proyecto (auth/admin-restricted-operation), informa en lugar de
  * degradar a un almacenamiento local que no es persistente. La sesión se memoiza: si ya está
  * activa no se repite la comprobación en cada subida.
@@ -165,11 +144,17 @@ interface FirebaseProbe {
   reason?: string;
   /** `true` si el fallo es transitorio (red): no se memoriza y se reintenta. */
   transient?: boolean;
+  error?: AttachmentError;
 }
 
 let firebaseProbe: Promise<FirebaseProbe> | null = null;
+let firebaseProbeAt = 0;
 function ensureFirebaseProbe(): Promise<FirebaseProbe> {
+  // Una sesión recuperada o una configuración corregida no queda bloqueada por una sonda antigua.
+  if (auth?.currentUser) return Promise.resolve({ usable: true });
+  if (Date.now() - firebaseProbeAt > 20_000) firebaseProbe = null;
   if (!firebaseProbe) {
+    firebaseProbeAt = Date.now();
     const probe = checkFirebaseStorageUsable();
     firebaseProbe = probe;
     // Un fallo transitorio (red) NO se memoriza: el siguiente intento debe poder volver a probar.
@@ -187,7 +172,8 @@ async function checkFirebaseStorageUsable(): Promise<FirebaseProbe> {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn("[attachments] Firebase Storage no utilizable:", reason);
     // Un bloqueo administrativo no se resuelve reintentando; una caída de red sí.
-    return { usable: false, reason, transient: isTransientNetworkAuthError(err) };
+    const error = attachmentFailure(err, "session", "firebase");
+    return { usable: false, reason, error, transient: error.retryable };
   }
 }
 
@@ -196,95 +182,96 @@ export function invalidateFirebaseStorageProbe(): void {
   firebaseProbe = null;
 }
 
+const firebaseAttachmentPort: StorageAttachmentPort = {
+  async metadata(path) {
+    try { return await getMetadata(ref(storage, path)); }
+    catch (err) {
+      if ((err as { code?: string })?.code === "storage/object-not-found") return null;
+      throw err;
+    }
+  },
+  async create(path, bytes, metadata, signal) {
+    signal.throwIfAborted();
+    const task = uploadBytesResumable(ref(storage, path), bytes, metadata);
+    const cancel = () => task.cancel();
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      if (signal.aborted) { task.cancel(); signal.throwIfAborted(); }
+      const snapshot = await task;
+      signal.throwIfAborted();
+      // La consulta posterior usa snapshot.ref (no una URL ni una ruta ajena a lo subido).
+      return { ...snapshot.metadata, fullPath: snapshot.ref.fullPath, bucket: snapshot.ref.bucket };
+    } finally { signal.removeEventListener("abort", cancel); }
+  },
+};
+let activeStoragePort = firebaseAttachmentPort;
+/** SOLO PRUEBAS: inyección del transporte, no cambia proyecto/credenciales/reglas. */
+export function __setStorageAttachmentPortForTests(port: StorageAttachmentPort | null): void {
+  activeStoragePort = port ?? firebaseAttachmentPort;
+}
+
+/** Misma cuenta, operación, inmueble y bytes => misma referencia en los dos transportes. */
+async function stableAttachmentId(opts: {
+  folder: AttachmentFolder; fileName: string; bytes: Uint8Array; movementId?: string; propertyId?: string;
+}): Promise<string> {
+  const contentHash = await sha256Hex(opts.bytes);
+  return `att_${await sha256Hex(utf8Bytes(JSON.stringify([
+    opts.folder, opts.fileName, opts.movementId ?? "", opts.propertyId ?? "", contentHash,
+  ])))}`;
+}
+
 export async function uploadAttachment(opts: {
   userId: string;
   folder: AttachmentFolder;
   file: File;
   attachmentId?: string;
-  /** Vincula el archivo a su movimiento en el índice del vault (trazabilidad). */
   movementId?: string;
-  /** Vincula el archivo a su inmueble en el índice del vault (trazabilidad). */
   propertyId?: string;
-  /** Solo para contratos generados (.doc). */
   allowWordDocument?: boolean;
 }): Promise<StoredAttachment> {
   const invalid = validateAttachment(opts.file, { allowWordDocument: opts.allowWordDocument });
-  if (invalid) throw new AttachmentError(invalid);
-
+  if (invalid) throw new AttachmentError(invalid, { phase: "validation", code: "attachment/invalid-file" });
   const contentType = resolveContentType(opts.file.name, opts.file.type);
+  const bytes = new Uint8Array(await opts.file.arrayBuffer());
+  const attachmentId = opts.attachmentId ?? await stableAttachmentId({ ...opts, fileName: opts.file.name, bytes });
 
-  // ---- 1) VAULT: almacenamiento remoto persistente propio (destino definitivo). ----
-  // No depende de la sesión anónima de Firebase. Si hay sesión del vault para este
-  // usuario, el archivo viaja al backend de la aplicación y queda disponible entre
-  // sesiones y dispositivos.
+  // Elegir destino ANTES de escribir. Una subida iniciada o un 401/403 nunca degrada a
+  // otra identidad/proveedor: podría completar tarde y generar una copia huérfana.
   if (getVaultToken(opts.userId)) {
     let capabilities: Awaited<ReturnType<typeof vaultCapabilities>> | null = null;
-    try {
-      capabilities = await vaultCapabilities();
-      if (capabilities.storageOk) {
-        const meta = await withTimeout(
-          vaultUploadFileAuto({
-            username: opts.userId,
-            file: opts.file,
-            name: opts.file.name,
-            contentType,
-            movementId: opts.movementId,
-            propertyId: opts.propertyId,
-            capabilities,
-          }),
-          UPLOAD_TIMEOUT_MS,
-          "La subida al almacenamiento remoto ha superado el tiempo de espera. El archivo no se ha guardado; inténtalo de nuevo."
-        );
-        return { mode: "vault", vaultId: meta.id, name: opts.file.name, contentType, size: meta.size };
+    try { capabilities = await vaultCapabilities(); }
+    catch (err) { console.warn("[attachments] Sonda del almacén remoto fallida:", err instanceof Error ? err.message : String(err)); }
+    if (capabilities?.storageOk && capabilities.durable) {
+      try {
+        const meta = await vaultUploadFileAuto({
+          username: opts.userId, file: opts.file, name: opts.file.name, contentType,
+          fileId: attachmentId, movementId: opts.movementId, propertyId: opts.propertyId, capabilities,
+        });
+        return { mode: "vault", vaultId: meta.id, name: meta.name, contentType: meta.contentType, size: meta.size };
+      } catch (err) {
+        invalidateVaultCapabilities();
+        const failure = attachmentFailure(err, "upload", "vault");
+        logAttachmentFailure(failure);
+        throw failure;
       }
-    } catch (err) {
-      if (!(err instanceof VaultAuthError || err instanceof VaultError || err instanceof AttachmentError)) {
-        throw err instanceof Error ? err : new AttachmentError(String(err));
-      }
-      // El almacén remoto no está disponible: se registra el motivo real y NO se sustituye
-      // por almacenamiento del navegador. Se intenta Firebase y, si tampoco, error explícito.
-      console.warn("[attachments] Almacenamiento remoto no disponible en esta subida:", err);
-      invalidateVaultCapabilities();
     }
-    // Con el almacén remoto inutilizable no se simula un guardado local: se informa y se para.
     const probe = await ensureFirebaseProbe();
     if (!probe.usable) {
-      throw new AttachmentError(
-        `${vaultUnavailableMessage(capabilities)}${probe.reason ? ` Firebase Storage tampoco está disponible: ${probe.reason}` : ""}`
-      );
+      throw new AttachmentError(`${vaultUnavailableMessage(capabilities)}${probe.reason ? ` Firebase Storage tampoco está disponible: ${probe.reason}` : ""}`,
+        { phase: probe.error?.phase, backend: "firebase", code: probe.error?.code, cause: probe.error, retryable: probe.error?.retryable });
     }
   } else {
-    // Sesión remota aún no establecida (p. ej. acceso anterior a esta función): se intenta
-    // Firebase y, si no está disponible, se explica el motivo real y qué hacer.
     const probe = await ensureFirebaseProbe();
     if (!probe.usable) {
-      throw new AttachmentError(
-        "El almacenamiento remoto de la aplicación no está activo en esta sesión: cierra sesión y vuelve " +
-          "a entrar para activarlo." +
-          (probe.reason ? ` Motivo: ${probe.reason}` : "") +
-          " El archivo no se ha guardado."
-      );
+      throw new AttachmentError("El almacenamiento remoto de la aplicación no está activo en esta sesión: cierra sesión y vuelve " +
+        "a entrar para activarlo." + (probe.reason ? ` Motivo: ${probe.reason}` : "") + " El archivo no se ha guardado.",
+        { phase: "session", backend: "firebase", code: probe.error?.code, cause: probe.error, retryable: probe.error?.retryable });
     }
   }
-
-  // ---- 2) FIREBASE STORAGE: solo si el proyecto Firebase autoriza la sesión. ----
-
-  const attachmentId = opts.attachmentId ?? newAttachmentId("att");
-  const storagePath = attachmentStoragePath(opts.userId, opts.folder, attachmentId, opts.file.name);
-
-  try {
-    await withTimeout(
-      uploadBytes(ref(storage, storagePath), opts.file, { contentType }),
-      UPLOAD_TIMEOUT_MS,
-      "La subida del archivo ha superado el tiempo de espera. No se ha guardado la operación; inténtalo de nuevo."
-    );
-  } catch (err) {
-    console.error("Attachment upload failed:", storagePath, err);
-    if (err instanceof AttachmentError) throw err;
-    throw new AttachmentError(describeStorageError(err));
-  }
-
-  return { mode: "storage", storagePath, name: opts.file.name, contentType, size: opts.file.size };
+  return uploadBytesVerified({
+    userId: opts.userId, folder: opts.folder, attachmentId, fileName: opts.file.name, contentType,
+    bytes, movementId: opts.movementId, propertyId: opts.propertyId,
+  });
 }
 
 /** Espera a la sesión de Firebase (necesaria antes de cualquier operación de Storage). */
@@ -298,10 +285,7 @@ export interface StorageStoredAttachment extends StoredAttachment {
   storagePath: string;
 }
 
-/**
- * Sube bytes ya decodificados (importaciones, contratos generados) y verifica que el objeto
- * en Storage coincide byte a byte con lo enviado. Si no coincide, lanza AttachmentError.
- */
+/** Bytes ya decodificados: la misma verificación de objeto que en el formulario manual. */
 export async function uploadBytesVerified(opts: {
   userId: string;
   folder: AttachmentFolder;
@@ -309,67 +293,73 @@ export async function uploadBytesVerified(opts: {
   fileName: string;
   contentType: string;
   bytes: Uint8Array;
+  movementId?: string;
+  propertyId?: string;
 }): Promise<StorageStoredAttachment> {
+  const invalid = validateAttachment({ name: opts.fileName, type: opts.contentType, size: opts.bytes.length },
+    { allowWordDocument: opts.folder === "contracts" });
+  if (invalid) throw new AttachmentError(invalid, { phase: "validation", code: "attachment/invalid-file" });
   await ensureSignedIn();
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, opts.attachmentId, opts.fileName);
-  // Sin `update` en las reglas: si el objeto ya existe con el mismo contenido (reimportación),
-  // se reutiliza; si existe con otro contenido, se aborta sin sobrescribir.
-  const port: VerifiedObjectPort = {
-    async read(path) {
-      try {
-        return new Uint8Array(
-          await withTimeout(
-            getStorageBytes(ref(storage, path), MAX_ATTACHMENT_BYTES),
-            UPLOAD_TIMEOUT_MS,
-            "La verificación del archivo ha superado el tiempo de espera. No se ha guardado la operación."
-          )
-        );
-      } catch (err) {
-        if ((err as { code?: string })?.code === "storage/object-not-found") return null;
-        throw err;
-      }
-    },
-    async create(path, bytes, contentType) {
-      await withTimeout(
-        uploadBytes(ref(storage, path), new Blob([bytes], { type: contentType }), { contentType }),
-        UPLOAD_TIMEOUT_MS,
-        "La subida del archivo ha superado el tiempo de espera. No se ha guardado la operación; inténtalo de nuevo."
-      );
-    },
-  };
   try {
-    await storeVerifiedObject(port, { path: storagePath, bytes: opts.bytes, contentType: opts.contentType });
+    await storeStorageAttachment(activeStoragePort, {
+      path: storagePath, bucket: ref(storage).bucket, bytes: opts.bytes, contentType: opts.contentType,
+      movementId: opts.movementId, propertyId: opts.propertyId,
+    });
   } catch (err) {
-    console.error("Verified upload failed:", storagePath, err);
-    if (err instanceof AttachmentError) throw err;
-    if (err instanceof ObjectConflictError) throw new AttachmentError(err.message);
-    throw new AttachmentError(describeStorageError(err));
+    const failure = attachmentFailure(err, "verification", "firebase");
+    logAttachmentFailure(failure);
+    throw failure;
   }
   return { mode: "storage", storagePath, name: opts.fileName, contentType: opts.contentType, size: opts.bytes.length };
 }
 
-/** URL temporal para previsualizar (img/iframe). No se persiste en Firestore. */
-export async function getAttachmentPreviewUrl(storagePath: string): Promise<string> {
+/** Antes de asociar una referencia existente, confirma que el objeto sigue disponible. */
+export async function verifyAttachmentReference(userId: string, source: {
+  vaultId?: string; storagePath?: string; movementId?: string; propertyId?: string;
+}, parentSignal?: AbortSignal): Promise<void> {
+  parentSignal?.throwIfAborted();
+  if (source.vaultId) {
+    const meta = await vaultVerifyFile(userId, source.vaultId, parentSignal);
+    if ((meta.movementId && source.movementId && meta.movementId !== source.movementId) ||
+        (meta.propertyId && source.propertyId && meta.propertyId !== source.propertyId)) {
+      throw new AttachmentError("El adjunto corresponde a otra operación o inmueble. No se confirma el guardado.",
+        { phase: "association", backend: "vault", code: "attachment/association-conflict" });
+    }
+    return;
+  }
+  if (!source.storagePath || !source.storagePath.startsWith(`users/${encodeURIComponent(userId)}/attachments/`)) {
+    throw new AttachmentError("La referencia del adjunto no pertenece a esta cuenta.",
+      { phase: "association", backend: "firebase", code: "attachment/invalid-reference" });
+  }
   await ensureSignedIn();
-  try {
-    return await getDownloadURL(ref(storage, storagePath));
-  } catch (err) {
-    throw new AttachmentError(describeStorageError(err));
+  const meta = await attachmentPhase("verification", "firebase", ATTACHMENT_TIMEOUTS.verification,
+    () => activeStoragePort.metadata(source.storagePath!), parentSignal);
+  if (!meta || meta.fullPath !== source.storagePath || meta.bucket !== ref(storage).bucket || !meta.generation || !meta.md5Hash || meta.size <= 0) {
+    throw new AttachmentError("El adjunto no está disponible en Firebase Storage. No se confirma el guardado.",
+      { phase: "verification", backend: "firebase", code: "storage/object-not-found" });
+  }
+  if ((meta.customMetadata?.rentasyncMovementId && source.movementId && meta.customMetadata.rentasyncMovementId !== source.movementId) ||
+      (meta.customMetadata?.rentasyncPropertyId && source.propertyId && meta.customMetadata.rentasyncPropertyId !== source.propertyId)) {
+    throw new AttachmentError("El adjunto corresponde a otra operación o inmueble. No se confirma el guardado.",
+      { phase: "association", backend: "firebase", code: "attachment/association-conflict" });
   }
 }
 
-/** Descarga los bytes de un adjunto de Storage (usa el SDK, sin depender de CORS en fetch). */
+/** URL LOCAL temporal, tras descarga autenticada. El llamante debe revocarla al cerrar el visor. */
+export async function getAttachmentPreviewUrl(storagePath: string): Promise<string> {
+  return URL.createObjectURL(await getAttachmentBytes(storagePath));
+}
+
+/** Descarga autenticada por referencia. El SDK requiere CORS para alt=media en el navegador. */
 export async function getAttachmentBytes(storagePath: string): Promise<Blob> {
   await ensureSignedIn();
   try {
-    return await withTimeout(
-      getBlob(ref(storage, storagePath), MAX_ATTACHMENT_BYTES),
-      UPLOAD_TIMEOUT_MS,
-      "La descarga del archivo ha superado el tiempo de espera."
-    );
+    return await attachmentPhase("download", "firebase", ATTACHMENT_TIMEOUTS.download,
+      () => getBlob(ref(storage, storagePath), MAX_ATTACHMENT_BYTES));
   } catch (err) {
     if (err instanceof AttachmentError) throw err;
-    throw new AttachmentError(describeStorageError(err));
+    throw attachmentFailure(err, "download", "firebase");
   }
 }
 
@@ -389,14 +379,10 @@ export async function getAttachmentBlob(source: {
     const username = source.vaultUsername ?? getActiveVaultUser();
     if (!username) throw new AttachmentError("No hay sesión del almacenamiento remoto para recuperar este archivo.");
     try {
-      return await withTimeout(
-        vaultDownloadFile(username, source.vaultId),
-        UPLOAD_TIMEOUT_MS,
-        "La descarga del archivo ha superado el tiempo de espera."
-      );
+      return await vaultDownloadFile(username, source.vaultId);
     } catch (err) {
       if (err instanceof AttachmentError) throw err;
-      throw new AttachmentError(err instanceof Error ? err.message : String(err));
+      throw attachmentFailure(err, "download", "vault");
     }
   }
   if (source.storagePath) return getAttachmentBytes(source.storagePath);

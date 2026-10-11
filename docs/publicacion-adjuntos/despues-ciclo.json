@@ -1,0 +1,16 @@
+{
+  "case": "CICLO-01",
+  "invariant": "Un borrado de padre prevalidado no debe destruirlo tras un commit de adjunto concurrente confirmado en otra instancia",
+  "ok": true,
+  "isolatedSimulation": true,
+  "instances": 2,
+  "remoteAcceptance": false,
+  "observed": {
+    "commitStatus": 200,
+    "deletionStatus": 409,
+    "parentReadStatus": 200,
+    "movementReadStatus": 200,
+    "confirmedReferenceRetained": true
+  },
+  "consequence": "invariante retenida en esta simulación"
+}

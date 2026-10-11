@@ -6,6 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AttachmentError, expenseReceiptFieldsFromStored, getAttachmentBlob, uploadAttachment } from "./attachments";
 import { setActiveVaultUser, storeVaultToken } from "./vaultClient";
+import { verifiedVaultFetchFake, sha256 } from "./attachmentTestFixtures";
+import { __resetVaultCapabilitiesCacheForTests } from "./vaultClient";
 import { receiptSource } from "./attachmentRules";
 
 function installLocalStorage(): Map<string, string> {
@@ -23,6 +25,7 @@ const NATIVE_FETCH = (globalThis as any).fetch;
 
 test.beforeEach(() => {
   installLocalStorage();
+  __resetVaultCapabilitiesCacheForTests();
 });
 
 test.afterEach(() => {
@@ -76,30 +79,16 @@ test("A3. los comprobantes históricos (data URL) siguen leyéndose sin reescrib
 
 test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase ni la cola local)", async () => {
   storeVaultToken("alice", "tok-u");
-  const calls: Array<{ url: string; init?: any }> = [];
-  (globalThis as any).fetch = async (url: string, init?: any) => {
-    calls.push({ url, init });
-    if (url === "/api/vault?op=health") {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, durable: true, driver: "vercel-blob", storageOk: true, directUpload: true, maxFileBytes: 10485760 }),
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        file: { id: "file_77", name: "factura.pdf", contentType: "application/pdf", size: 4, sha256: "h" },
-      }),
-    };
-  };
+  const fake = verifiedVaultFetchFake();
+  const calls = fake.calls;
+  (globalThis as any).fetch = fake.fetch;
 
   const file = new File([new Uint8Array([1, 2, 3, 4])], "factura.pdf", { type: "application/pdf" });
   const stored = await uploadAttachment({
     userId: "alice",
     folder: "expenses",
     file,
+    attachmentId: "file_77",
     movementId: "exp_1",
     propertyId: "prop_1",
   });
@@ -107,11 +96,12 @@ test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase n
   assert.equal(stored.mode, "vault");
   assert.equal(stored.vaultId, "file_77");
   assert.equal(stored.storagePath, undefined);
-  // Red: sonda de capacidades + subida. Firebase Storage no se invoca en ningún caso.
-  assert.equal(calls.length, 2);
+  // Red: sonda, subida y verificación del objeto por ID. Firebase no se invoca.
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].url, "/api/vault?op=health");
   assert.equal(calls[1].url, "/api/vault?op=files.upload");
-  const body = JSON.parse(calls[1].init.body);
+  assert.equal(calls[2].url, "/api/vault?op=files.verify&id=file_77");
+  const body = JSON.parse(String(calls[1].init.body));
   assert.equal(body.movementId, "exp_1");
   assert.equal(body.propertyId, "prop_1");
   assert.equal(body.contentType, "application/pdf");
@@ -129,6 +119,7 @@ test("A5. getAttachmentBlob resuelve por referencia vault con el usuario activo"
     return {
       ok: true,
       status: 200,
+      headers: new Headers({ "x-vault-sha256": sha256(new Uint8Array([7])) }),
       blob: async () => new Blob([new Uint8Array([7])]),
       json: async () => ({}),
     };

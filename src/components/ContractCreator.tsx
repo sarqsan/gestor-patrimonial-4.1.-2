@@ -1,8 +1,10 @@
 import { readApiJson } from "../lib/apiResponse";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { AppState, Property } from "../types";
-import { newAttachmentId, WORD_DOCUMENT_MIME } from "../lib/attachmentRules";
-import { uploadAttachment } from "../lib/attachments";
+import { WORD_DOCUMENT_MIME } from "../lib/attachmentRules";
+import { uploadAttachment, StoredAttachment } from "../lib/attachments";
+import type { PendingAttachmentReference } from "../lib/attachmentPersistence";
+import { sha256Hex } from "../lib/stableHash";
 import { 
   FileText, 
   Download, 
@@ -23,7 +25,7 @@ import {
 
 interface ContractCreatorProps {
   state: AppState;
-  onEditProperty: (updatedProperty: Property) => void;
+  onEditProperty: (updatedProperty: Property, attachments?: PendingAttachmentReference[]) => void | Promise<void>;
   addSyncEvent: (source: string, target: string, action: string, details: string) => void;
   currentUser?: string;
 }
@@ -62,6 +64,9 @@ export default function ContractCreator({ state, onEditProperty, addSyncEvent, c
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedContractText, setGeneratedContractText] = useState("");
   const [isLinked, setIsLinked] = useState(false);
+  const [isLinking, setIsLinking] = useState(false);
+  const linkingRef = useRef(false);
+  const uploadedContractRef = useRef<{ sha256: string; propertyId: string; stored: StoredAttachment } | null>(null);
   const [copied, setCopied] = useState(false);
 
   // Warnings / Validation states
@@ -240,6 +245,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
 
   // Save/Link contract parameters directly to the Property module in state
   const handleLinkToProperty = async () => {
+    if (linkingRef.current) return;
     if (!selectedPropertyId || selectedPropertyId === "manual") {
       alert("Selecciona un inmueble de tu cartera para vincular este contrato.");
       return;
@@ -254,19 +260,16 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
 
     // El contrato generado se guarda como archivo real en Storage (no solo como nombre).
     const pdfName = `Contrato_Generado_${prop.address.split(",")[0].replace(/\s+/g, "_")}.doc`;
-    let stored;
+    linkingRef.current = true;
+    setIsLinking(true);
     try {
-      stored = await uploadAttachment({
-        userId: currentUser,
-        folder: "contracts",
-        file: new File([buildContractDocBlob()], pdfName, { type: WORD_DOCUMENT_MIME }),
-        attachmentId: newAttachmentId("ctr"),
-        allowWordDocument: true,
+      const file = new File([buildContractDocBlob()], pdfName, { type: WORD_DOCUMENT_MIME });
+      const sha256 = await sha256Hex(new Uint8Array(await file.arrayBuffer()));
+      const cached = uploadedContractRef.current;
+      const stored = cached?.sha256 === sha256 && cached.propertyId === prop.id ? cached.stored : await uploadAttachment({
+        userId: currentUser, folder: "contracts", file, propertyId: prop.id, allowWordDocument: true,
       });
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "No se pudo guardar el contrato en Storage. El inmueble no se ha modificado.");
-      return;
-    }
+      uploadedContractRef.current = { sha256, propertyId: prop.id, stored };
 
     const updatedProp: Property = {
       ...prop,
@@ -283,8 +286,13 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
       }
     };
 
-    onEditProperty(updatedProp);
+    await onEditProperty(updatedProp, [{ storagePath: stored.storagePath, vaultId: stored.vaultId, propertyId: prop.id }]);
+    uploadedContractRef.current = null;
     setIsLinked(true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo confirmar el contrato. Los datos se conservan para reintentar.");
+      return;
+    } finally { linkingRef.current = false; setIsLinking(false); }
 
     // Trigger sync log event
     addSyncEvent(
@@ -891,7 +899,7 @@ D./Dña. ${landlordName || "..."}                  D./Dña. ${tenantName || "...
                 <button
                   type="button"
                   onClick={handleLinkToProperty}
-                  disabled={isLinked}
+                  disabled={isLinked || isLinking}
                   className={`flex-1 sm:flex-none inline-flex items-center justify-center px-3 py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
                     isLinked 
                       ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"

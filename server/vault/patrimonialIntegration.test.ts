@@ -110,15 +110,6 @@ test("I1-I4. Altas, relaciones, recuperación tras reinicio e idempotencia", asy
   // Titulares (con la relación de titularidad viva en el inmueble).
   assert.equal((await json("POST", `${base}/api/vault?op=entities.put`, { type: "owners", id: "user1", entity: propietario1 }, ana)).status, 201);
   assert.equal((await json("POST", `${base}/api/vault?op=entities.put`, { type: "owners", id: "user2", entity: propietario2 }, ana)).status, 201);
-  // Inmueble con contrato embebido y metadatos de documento (relaciones por id).
-  assert.equal((await json("POST", `${base}/api/vault?op=entities.put`, { type: "properties", id: inmueble.id, entity: inmueble }, ana)).status, 201);
-  // Contrato del redactor como entidad independiente, relacionado por propertyId.
-  assert.equal(
-    (await json("POST", `${base}/api/vault?op=entities.put`, { type: "contracts", id: "ct_redactor_1", entity: { id: "ct_redactor_1", propertyId: "prop_sint_1", clauses: "sintético" } }, ana)).status,
-    201
-  );
-  // Movimiento con receiptVaultId → documento.
-  assert.equal((await json("PUT", `${base}/api/vault?op=movimientos`, { movements: [movimiento] }, ana)).status, 200);
   // Documentos binarios asociados: recibo del movimiento, contrato y documento del inmueble.
   for (const [id, movementId, propertyId] of [
     ["file_recibo_1", "mov_sint_1", "prop_sint_1"],
@@ -135,6 +126,16 @@ test("I1-I4. Altas, relaciones, recuperación tras reinicio e idempotencia", asy
     assert.equal(up.body.file.sha256, sha(PDF));
   }
 
+
+  // Inmueble con contrato embebido y metadatos de documento (relaciones por id).
+  assert.equal((await json("POST", `${base}/api/vault?op=entities.put`, { type: "properties", id: inmueble.id, entity: inmueble }, ana)).status, 201);
+  // Contrato del redactor como entidad independiente, relacionado por propertyId.
+  assert.equal(
+    (await json("POST", `${base}/api/vault?op=entities.put`, { type: "contracts", id: "ct_redactor_1", entity: { id: "ct_redactor_1", propertyId: "prop_sint_1", clauses: "sintético" } }, ana)).status,
+    201
+  );
+  // Movimiento con receiptVaultId → documento.
+  assert.equal((await json("PUT", `${base}/api/vault?op=movimientos`, { movements: [movimiento] }, ana)).status, 200);
   // I4. Repetir las operaciones: cero duplicados.
   assert.equal((await json("PUT", `${base}/api/vault?op=movimientos`, { movements: [movimiento] }, ana)).status, 200);
   assert.equal((await json("POST", `${base}/api/vault?op=entities.put`, { type: "properties", id: inmueble.id, entity: inmueble }, ana)).status, 201);
