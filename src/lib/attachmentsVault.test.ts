@@ -1,10 +1,12 @@
-// Pruebas del modo vault de los adjuntos: prioridad de destino (vault → Storage → cola
-// local), campos por modo y resolución de descargas por referencia.
+// Pruebas del modo vault de los adjuntos: prioridad de destino (vault → Storage),
+// campos por modo, resolución de descargas por referencia y compatibilidad con los
+// adjuntos históricos incrustados (data URL).
 // Ejecutar con: npm test  (node:test + tsx; fetch y localStorage se stubban, sin red real)
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AttachmentError, expenseReceiptFieldsFromStored, getAttachmentBlob, uploadAttachment } from "./attachments";
 import { setActiveVaultUser, storeVaultToken } from "./vaultClient";
+import { receiptSource } from "./attachmentRules";
 
 function installLocalStorage(): Map<string, string> {
   const store = new Map<string, string>();
@@ -59,18 +61,15 @@ test("A2. modo storage escribe solo receiptPath (limpia vault y cola local)", ()
   assert.equal(f.receiptUrl, undefined);
 });
 
-test("A3. modo cola local escribe solo receiptUrl (limpia vault y Storage)", () => {
-  const dataUrl = "data:image/jpeg;base64,QUJD";
-  const f = expenseReceiptFieldsFromStored({
-    mode: "local-inline",
-    inlineData: dataUrl,
-    name: "foto.jpg",
-    contentType: "image/jpeg",
-    size: 3,
-  });
-  assert.equal(f.receiptUrl, dataUrl);
-  assert.equal(f.receiptVaultId, undefined);
-  assert.equal(f.receiptPath, undefined);
+test("A3. los comprobantes históricos (data URL) siguen leyéndose sin reescribirse", async () => {
+  const dataUrl = "data:application/pdf;base64,QUJD";
+  const blob = await getAttachmentBlob({ inlineData: dataUrl });
+  assert.equal(blob.size, 3, "el comprobante histórico se recupera igual que antes");
+  // Y la resolución de origen lo reconoce como adjunto legado (compatibilidad hacia atrás).
+  const source = receiptSource({ receiptUrl: dataUrl });
+  assert.equal(source.inlineData, dataUrl);
+  assert.equal(source.vaultId, undefined);
+  assert.equal(source.storagePath, undefined);
 });
 
 // --- Prioridad de subida ------------------------------------------------------
@@ -80,6 +79,13 @@ test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase n
   const calls: Array<{ url: string; init?: any }> = [];
   (globalThis as any).fetch = async (url: string, init?: any) => {
     calls.push({ url, init });
+    if (url === "/api/vault/health") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, durable: true, driver: "vercel-blob", storageOk: true, directUpload: true, maxFileBytes: 10485760 }),
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -101,11 +107,11 @@ test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase n
   assert.equal(stored.mode, "vault");
   assert.equal(stored.vaultId, "file_77");
   assert.equal(stored.storagePath, undefined);
-  assert.equal(stored.inlineData, undefined);
-  // Una sola llamada de red: la del vault. Firebase Storage no se invoca.
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "/api/vault/files");
-  const body = JSON.parse(calls[0].init.body);
+  // Red: sonda de capacidades + subida. Firebase Storage no se invoca en ningún caso.
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, "/api/vault/health");
+  assert.equal(calls[1].url, "/api/vault/files");
+  const body = JSON.parse(calls[1].init.body);
   assert.equal(body.movementId, "exp_1");
   assert.equal(body.propertyId, "prop_1");
   assert.equal(body.contentType, "application/pdf");

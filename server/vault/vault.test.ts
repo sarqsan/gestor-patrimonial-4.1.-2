@@ -20,7 +20,8 @@ import { createHash } from "node:crypto";
 import type { Server } from "node:http";
 
 import { createApiApp } from "../apiApp.js";
-import { VaultStore, VAULT_MAX_FILE_BYTES, safeId } from "./store.js";
+import { FsVaultPersistence, VAULT_MAX_FILE_BYTES, safeSegment } from "./persistence.js";
+import { storeNewFile } from "./routes.js";
 import { hashPassword, verifyPassword, createSessionToken, verifySessionToken } from "./auth.js";
 import { crc32 } from "./zip.js";
 
@@ -98,12 +99,12 @@ test("S2. Tokens HMAC: firma, caducidad y manipulación", () => {
 });
 
 test("S3. Identificadores seguros (anti path-traversal)", () => {
-  assert.equal(safeId("file_123-abc_OK"), "file_123-abc_OK");
-  assert.equal(safeId("../etc/passwd"), null);
-  assert.equal(safeId("a/b"), null);
-  assert.equal(safeId("a\\b"), null);
-  assert.equal(safeId(""), null);
-  assert.equal(safeId("x".repeat(129)), null);
+  assert.equal(safeSegment("file_123-abc_OK"), "file_123-abc_OK");
+  assert.equal(safeSegment("../etc/passwd"), null);
+  assert.equal(safeSegment("a/b"), null);
+  assert.equal(safeSegment("a\\b"), null);
+  assert.equal(safeSegment(""), null);
+  assert.equal(safeSegment("x".repeat(129)), null);
 });
 
 // ---------- extremo a extremo por HTTP ----------
@@ -210,10 +211,16 @@ test("E4. Límites espejo de storage.rules: tamaño y tipos", async () => {
   assert.equal(empty.status, 400, "archivo vacío se rechaza");
 
   // Límite binario en el almacén (10 MB)
-  const store = new VaultStore(dataDir);
+  // Límite binario aplicado en la capa de escritura (independiente del transporte HTTP).
   const tooBig = new Uint8Array(VAULT_MAX_FILE_BYTES + 1);
   await assert.rejects(
-    () => store.putFile("cuenta_limites", { name: "g.pdf", contentType: "application/pdf", bytes: tooBig }),
+    () =>
+      storeNewFile(new FsVaultPersistence(dataDir), {
+        username: "cuenta_limites",
+        name: "g.pdf",
+        contentType: "application/pdf",
+        bytes: tooBig,
+      }),
     /límite de 10 MB/i
   );
 });

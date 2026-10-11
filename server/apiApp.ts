@@ -7,8 +7,13 @@ import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
-import { createVaultRouter } from "./vault/routes.js";
-import { VaultStore } from "./vault/store.js";
+import { createVaultRouter, type VaultRouterOptions } from "./vault/routes.js";
+import {
+  BlobVaultPersistence,
+  VaultStorageUnavailableError,
+  selectVaultPersistence,
+} from "./vault/persistence.js";
+import type { VaultPersistence } from "./vault/persistenceTypes.js";
 
 dotenv.config();
 
@@ -73,7 +78,20 @@ async function generateContentWithRetry(
   throw lastError || new Error("No se pudo conectar con los modelos de IA de Gemini tras varios intentos.");
 }
 
-export function createApiApp() {
+export interface ApiAppOptions {
+  /** Permite inyectar el destino del vault (pruebas de integración con un almacén simulado). */
+  vaultPersistence?: VaultPersistence;
+  /** Firma de subidas directas; por defecto la del almacén remoto configurado. */
+  vaultPresign?: (opts: {
+    username: string;
+    fileId: string;
+    contentType: string;
+    maxBytes: number;
+    validUntil: number;
+  }) => Promise<{ url: string; headers: Record<string, string>; validUntil: number } | null>;
+}
+
+export function createApiApp(options: ApiAppOptions = {}) {
   const app = express();
 
   // Middleware for JSON payloads. 15mb: los archivos del vault viajan como Base64 en JSON
@@ -81,12 +99,23 @@ export function createApiApp() {
   // valida en el vault, no aquí.
   app.use(express.json({ limit: "15mb" }));
 
-  // ---- Vault: almacenamiento remoto persistente propio (auth, movimientos, archivos, copias) ----
-  // Directorio de datos: volumen persistente en producción (RENTASYNC_VAULT_DIR, p. ej. /var/data
-  // con un disco adjunto en Render). Ver docs/propuesta-almacenamiento-remoto.md.
-  const vaultDir = process.env.RENTASYNC_VAULT_DIR || path.join(process.cwd(), "data", "vault");
-  const vaultStore = new VaultStore(vaultDir);
-  app.use("/api/vault", createVaultRouter({ store: vaultStore }));
+  // ---- Vault: almacenamiento remoto persistente (auth, movimientos, documentos, copias) ----
+  // Destino de producción: almacén Blob PRIVADO de Vercel (contenido binario + datos
+  // estructurados por entidad). Fuera de Vercel se admite un directorio local solo para
+  // desarrollo/pruebas; si no hay ningún destino, las escrituras fallan de forma explícita
+  // (la aplicación nunca declara guardado en local como si fuera remoto).
+  const vaultPersistence = options.vaultPersistence ?? selectVaultPersistence();
+  const vaultBlob =
+    vaultPersistence instanceof BlobVaultPersistence ? vaultPersistence : null;
+  const vaultPresign =
+    options.vaultPresign ?? (vaultBlob ? (o: Parameters<NonNullable<VaultRouterOptions["presign"]>>[0]) => vaultBlob.presignContentUpload(o) : undefined);
+  app.use(
+    "/api/vault",
+    createVaultRouter({
+      persistence: vaultPersistence,
+      ...(vaultPresign ? { presign: vaultPresign } : {}),
+    })
+  );
 
   // API Route: Extract tax declaration details using Gemini 3.5 Flash
   app.post("/api/extract", async (req, res) => {
@@ -376,9 +405,15 @@ Devuelve los importes como números decimales y las fechas en formato YYYY-MM-DD
   // Errores de Express (p. ej. JSON mal formado o cuerpo demasiado grande) también en JSON.
   // No se devuelve el stack ni datos de la petición.
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (res.headersSent) return;
+    // Destino remoto no disponible: 503 con el motivo, nunca un 500 genérico ni un éxito falso.
+    if (err instanceof VaultStorageUnavailableError) {
+      console.error("[vault] Almacenamiento remoto no disponible:", err.message);
+      res.status(503).json({ ok: false, error: err.message, storageOk: false });
+      return;
+    }
     const status = typeof err?.status === "number" && err.status >= 400 && err.status < 600 ? err.status : 500;
     if (status >= 500) console.error("[api] Error no controlado:", err);
-    if (res.headersSent) return;
     const message =
       status === 400 ? "La petición no es un JSON válido."
       : status === 413 ? "La petición supera el tamaño máximo admitido."

@@ -228,18 +228,13 @@ export default function Properties({
       category: docCategory,
       year: docYear,
       uploadDate: new Date().toLocaleDateString('es-ES'),
-      // Cada modo escribe SU referencia y ninguna otra: vault (destino remoto propio),
-      // Storage (Firebase) o fileData legado (cola local cuando no hay destino remoto).
+      // Cada modo escribe SU referencia y ninguna otra: vault (almacén remoto privado) o
+      // Storage (Firebase). No existe un modo local: si la subida no llega al destino remoto,
+      // no se registra el documento.
       storagePath: stored.mode === "storage" ? stored.storagePath : undefined,
       vaultId: stored.mode === "vault" ? stored.vaultId : undefined,
-      fileData: stored.mode === "local-inline" ? stored.inlineData : undefined,
       contentType: stored.contentType,
     };
-    if (stored.mode === "local-inline") {
-      alert(
-        "El almacenamiento remoto no está disponible ahora mismo: el documento queda en la COLA LOCAL de este navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
-      );
-    }
 
     const updatedProp: Property = {
       ...prop,

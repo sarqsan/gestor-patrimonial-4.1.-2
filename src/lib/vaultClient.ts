@@ -127,6 +127,79 @@ export async function vaultHealth(): Promise<boolean> {
   }
 }
 
+/** Capacidades del almacenamiento remoto, tal y como las declara el backend. */
+export interface VaultCapabilities {
+  /** El destino es remoto y sobrevive a nuevos despliegues/ejecuciones. */
+  durable: boolean;
+  /** Motor real: `vercel-blob` en producción. */
+  driver: string;
+  /** El almacén remoto responde y es escribible. */
+  storageOk: boolean;
+  detail?: string;
+  maxFileBytes: number;
+  /** La subida directa (sin pasar por la función serverless) está disponible. */
+  directUpload: boolean;
+}
+
+export class VaultNotConfiguredError extends VaultError {}
+
+let capabilitiesCache: { at: number; value: VaultCapabilities } | null = null;
+
+/**
+ * Consulta las capacidades del almacén remoto (con caché corta para no repetir la sonda
+ * en cada subida). Si el backend no responde, el resultado es "no disponible": la
+ * aplicación nunca lo interpreta como almacenamiento local válido.
+ */
+export async function vaultCapabilities(force = false): Promise<VaultCapabilities> {
+  if (!force && capabilitiesCache && Date.now() - capabilitiesCache.at < 20_000) return capabilitiesCache.value;
+  let res: Response;
+  try {
+    res = await fetch("/api/vault/health", { method: "GET" });
+  } catch {
+    throw new VaultUnavailableError(
+      "No se ha podido contactar con el almacenamiento remoto de la aplicación. El archivo no se ha guardado."
+    );
+  }
+  if (!res.ok) {
+    throw new VaultUnavailableError(
+      `El almacenamiento remoto ha respondido con un error (${res.status}). El archivo no se ha guardado.`
+    );
+  }
+  const body = (await res.json()) as Partial<VaultCapabilities> & { ok?: boolean };
+  const value: VaultCapabilities = {
+    durable: Boolean(body.durable),
+    driver: String(body.driver ?? "desconocido"),
+    storageOk: Boolean(body.storageOk),
+    detail: body.detail,
+    maxFileBytes: Number(body.maxFileBytes) || 10 * 1024 * 1024,
+    directUpload: Boolean(body.directUpload),
+  };
+  capabilitiesCache = { at: Date.now(), value };
+  return value;
+}
+
+/** Descarta la caché de capacidades (tras un fallo real de escritura conviene volver a sondear). */
+export function invalidateVaultCapabilities(): void {
+  capabilitiesCache = null;
+}
+
+/** SOLO PRUEBAS: deja la sonda de capacidades sin caché. */
+export function __resetVaultCapabilitiesCacheForTests(): void {
+  capabilitiesCache = null;
+}
+
+/** Mensaje único y explícito cuando no existe almacenamiento remoto utilizable. */
+export function vaultUnavailableMessage(caps: VaultCapabilities | null): string {
+  const suffix =
+    "No se ha guardado nada y no se ha usado el almacenamiento del navegador como sustituto: " +
+    "hace falta un almacenamiento remoto persistente configurado en el despliegue.";
+  if (!caps) return `El almacenamiento remoto de la aplicación no responde. ${suffix}`;
+  if (!caps.storageOk) {
+    return `El almacenamiento remoto no está conectado en este despliegue (${caps.detail || caps.driver}). ${suffix}`;
+  }
+  return `El almacenamiento remoto no está disponible. ${suffix}`;
+}
+
 /**
  * Garantiza una sesión del vault para el usuario de la app.
  * Primer uso: registra la cuenta en el vault con las MISMAS credenciales de la aplicación
@@ -193,8 +266,138 @@ export async function vaultUploadFile(opts: {
   return body.file as VaultFileMeta;
 }
 
-/** Descarga un archivo del vault por su referencia. */
-export async function vaultDownloadFile(username: string, fileId: string): Promise<Blob> {
+/**
+ * Sube un archivo por la vía directa: el servidor firma una subida de UN solo objeto
+ * (operación, tipo, tamaño y caducidad acotados) y el navegador escribe el contenido
+ * directamente en el almacén privado, sin atravesar el límite de cuerpo de la función
+ * serverless y sin recibir ninguna credencial del almacén. Después, el servidor descarga
+ * el objeto, recalcula su SHA-256 y solo entonces consolida los metadatos.
+ */
+export async function vaultUploadFileDirect(opts: {
+  username: string;
+  file: Blob & { name?: string };
+  name: string;
+  contentType: string;
+  movementId?: string;
+  propertyId?: string;
+}): Promise<VaultFileMeta> {
+  const token = getVaultToken(opts.username);
+  if (!token) throw new VaultAuthError("No hay sesión del almacenamiento remoto para este usuario.");
+
+  const bytes = new Uint8Array(await opts.file.arrayBuffer());
+  const presign = await vaultFetch("/files/presign", {
+    method: "POST",
+    token,
+    body: {
+      name: opts.name,
+      contentType: opts.contentType,
+      size: bytes.length,
+      movementId: opts.movementId,
+      propertyId: opts.propertyId,
+    },
+  });
+  if (!presign.ok) throw new VaultError(await parseError(presign));
+  const reservation = (await presign.json()) as {
+    fileId: string;
+    upload: { url: string; headers: Record<string, string>; validUntil: number };
+  };
+
+  // Escritura directa en el almacén remoto (URL firmada y acotada por el servidor).
+  let putRes: Response;
+  try {
+    putRes = await fetch(reservation.upload.url, {
+      method: "PUT",
+      headers: { ...reservation.upload.headers, "content-type": opts.contentType },
+      body: opts.file,
+    });
+  } catch {
+    throw new VaultUnavailableError(
+      "La subida directa al almacenamiento remoto ha fallado por red. El archivo no se ha guardado."
+    );
+  }
+  if (!putRes.ok) {
+    throw new VaultError(
+      `El almacenamiento remoto ha rechazado la subida directa (${putRes.status}). El archivo no se ha guardado.`
+    );
+  }
+
+  const sha256 = await sha256Hex(bytes);
+  const commit = await vaultFetch(`/files/${encodeURIComponent(reservation.fileId)}/commit`, {
+    method: "POST",
+    token,
+    body: { size: bytes.length, sha256 },
+  });
+  if (!commit.ok) throw new VaultError(await parseError(commit));
+  const body = await commit.json();
+  return body.file as VaultFileMeta;
+}
+
+/** Umbral a partir del cual conviene la vía directa (el cuerpo JSON viaja en Base64). */
+export const DIRECT_UPLOAD_THRESHOLD_BYTES = 2_500_000;
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Sube un archivo al almacén remoto eligiendo el transporte: directo (grandes, sin límite de
+ * cuerpo) o en el cuerpo JSON (pequeños, con el hash calculado por el servidor). Si la vía
+ * JSON rechaza el tamaño pero la directa está disponible, se reintenta por la directa.
+ */
+export async function vaultUploadFileAuto(opts: {
+  username: string;
+  file: Blob & { name?: string };
+  name: string;
+  contentType: string;
+  movementId?: string;
+  propertyId?: string;
+  capabilities?: VaultCapabilities;
+}): Promise<VaultFileMeta> {
+  const caps = opts.capabilities ?? (await vaultCapabilities());
+  const size = opts.file.size;
+  const useDirect = caps.directUpload && size > DIRECT_UPLOAD_THRESHOLD_BYTES;
+
+  if (useDirect) {
+    return vaultUploadFileDirect({
+      username: opts.username,
+      file: opts.file,
+      name: opts.name,
+      contentType: opts.contentType,
+      movementId: opts.movementId,
+      propertyId: opts.propertyId,
+    });
+  }
+
+  try {
+    const bytes = new Uint8Array(await opts.file.arrayBuffer());
+    return await vaultUploadFile({
+      username: opts.username,
+      bytes,
+      name: opts.name,
+      contentType: opts.contentType,
+      movementId: opts.movementId,
+      propertyId: opts.propertyId,
+    });
+  } catch (err) {
+    // Cuerpo demasiado grande para la función: se reintenta por la vía directa si está disponible.
+    if (caps.directUpload && err instanceof VaultError && /tamaño|supera|413/i.test(err.message)) {
+      return vaultUploadFileDirect({
+        username: opts.username,
+        file: opts.file,
+        name: opts.name,
+        contentType: opts.contentType,
+        movementId: opts.movementId,
+        propertyId: opts.propertyId,
+      });
+    }
+    throw err;
+  }
+}
+
+/** Descarga un archivo del vault por su referencia. */export async function vaultDownloadFile(username: string, fileId: string): Promise<Blob> {
   const token = getVaultToken(username);
   if (!token) throw new VaultAuthError("No hay sesión del almacenamiento remoto para este usuario.");
   const res = await fetch(`/api/vault/files/${encodeURIComponent(fileId)}`, {

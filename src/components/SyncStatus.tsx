@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { AppState, SaveStatus, SyncEvent } from "../types";
 import MigrationPanel from "./MigrationPanel";
+import { vaultCapabilities, type VaultCapabilities } from "../lib/vaultClient";
 import RecoveryPreviewPanel from "./RecoveryPreviewPanel";
 import { 
   RefreshCw, 
@@ -26,6 +27,26 @@ interface SyncStatusProps {
 export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSync, onClearLog, onMigrationApplied }: SyncStatusProps) {
   const { syncEvents, syncEnabled } = state;
 
+  // Estado REAL del almacenamiento remoto de documentos (sonda al backend, no un texto fijo).
+  const [storage, setStorage] = useState<{ loading: boolean; caps: VaultCapabilities | null; error: string | null }>(
+    { loading: true, caps: null, error: null }
+  );
+  useEffect(() => {
+    let cancelled = false;
+    vaultCapabilities(true)
+      .then((caps) => { if (!cancelled) setStorage({ loading: false, caps, error: null }); })
+      .catch((err) => { if (!cancelled) setStorage({ loading: false, caps: null, error: err instanceof Error ? err.message : String(err) }); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const storageBadge = storage.loading
+    ? { text: "Comprobando…", cls: "bg-slate-500/20 text-slate-300 border-slate-500/30" }
+    : storage.caps?.storageOk && storage.caps.durable
+      ? { text: `Conectado (${storage.caps.driver})`, cls: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" }
+      : storage.caps?.storageOk
+        ? { text: "Conectado (almacenamiento NO duradero)", cls: "bg-amber-500/20 text-amber-300 border-amber-500/30" }
+        : { text: "NO conectado", cls: "bg-red-500/20 text-red-300 border-red-500/40" };
+
   // Estado real del último guardado (no un texto fijo).
   const statusBadge =
     saveStatus.kind === "saved"
@@ -47,6 +68,43 @@ export default function SyncStatus({ state, saveStatus, onRetrySave, onToggleSyn
             Supervisa la sincronización instantánea de tus rentas, gastos y cambios de amortización entre todos los módulos activos.
           </p>
         </div>
+      </div>
+
+      {/* ALMACENAMIENTO REMOTO DE DOCUMENTOS: estado real del destino persistente */}
+      <div className={`border rounded-2xl p-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 ${
+        storage.caps?.storageOk && storage.caps.durable ? "bg-emerald-950/20 border-emerald-500/30" : "bg-red-950/20 border-red-500/30"
+      }`}>
+        <div className="flex items-start space-x-4">
+          <div className={`p-3 rounded-xl ${storage.caps?.storageOk && storage.caps.durable ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>
+            <ShieldCheck className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="flex items-center space-x-2">
+              <h3 className="font-bold text-white text-md">Documentos y datos persistentes</h3>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase font-mono border ${storageBadge.cls}`}>
+                {storageBadge.text}
+              </span>
+            </div>
+            <p className="text-xs text-slate-300 mt-0.5 leading-normal max-w-2xl">
+              {storage.caps?.storageOk && storage.caps.durable
+                ? "Los justificantes, contratos y documentos se guardan en el almacén remoto privado y se recuperan desde cualquier dispositivo. Si el almacén no responde, la subida se cancela de forma explícita: nunca se da por guardado un archivo que solo esté en este navegador."
+                : "El almacenamiento remoto no está disponible en este despliegue, así que NO se pueden guardar documentos: la subida se cancela con un aviso, en lugar de fingir que se ha guardado."}
+            </p>
+            {storage.error && <p className="text-[11px] font-mono text-red-300/80 mt-1">{storage.error}</p>}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setStorage({ loading: true, caps: null, error: null });
+            vaultCapabilities(true)
+              .then((caps) => setStorage({ loading: false, caps, error: null }))
+              .catch((err) => setStorage({ loading: false, caps: null, error: err instanceof Error ? err.message : String(err) }));
+          }}
+          className="px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all shrink-0 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+        >
+          Comprobar de nuevo
+        </button>
       </div>
 
       {/* SYNC CONFIG STATUS CARD */}
