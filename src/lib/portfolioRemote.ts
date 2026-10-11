@@ -65,7 +65,7 @@ interface EntityRecord {
 async function request(
   username: string,
   op: string,
-  opts: { id?: string; type?: PortfolioEntityType; method?: string; body?: unknown }
+  opts: { id?: string; type?: PortfolioEntityType; method?: string; body?: unknown; signal?: AbortSignal }
 ): Promise<Response> {
   const token = getVaultToken(username);
   if (!token) throw new VaultAuthError("No hay sesión del almacenamiento remoto para este usuario.");
@@ -81,8 +81,11 @@ async function request(
         authorization: `Bearer ${token}`,
       },
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: opts.signal,
     });
-  } catch {
+    opts.signal?.throwIfAborted();
+  } catch (err) {
+    opts.signal?.throwIfAborted();
     throw new VaultUnavailableError(
       "No se ha podido conectar con el almacenamiento remoto de la aplicación. La cartera no se ha guardado."
     );
@@ -93,15 +96,15 @@ async function request(
   return res;
 }
 
-async function listEntitiesRemote(username: string, type: PortfolioEntityType): Promise<EntityRecord[]> {
-  const res = await request(username, "entities.list", { type });
+async function listEntitiesRemote(username: string, type: PortfolioEntityType, signal?: AbortSignal): Promise<EntityRecord[]> {
+  const res = await request(username, "entities.list", { type, signal });
   if (!res.ok) throw new VaultError(`Error ${res.status} al leer entidades (${type}) del almacenamiento remoto.`);
   const body = (await res.json()) as { entities?: EntityRecord[] };
   return body.entities ?? [];
 }
 
-async function putEntityRemote(username: string, type: PortfolioEntityType, id: string, entity: unknown): Promise<void> {
-  const res = await request(username, "entities.put", { method: "POST", body: { type, id, entity } });
+async function putEntityRemote(username: string, type: PortfolioEntityType, id: string, entity: unknown, signal?: AbortSignal): Promise<void> {
+  const res = await request(username, "entities.put", { method: "POST", body: { type, id, entity }, signal });
   if (!res.ok) {
     let detail = `Error ${res.status}`;
     try {
@@ -113,8 +116,8 @@ async function putEntityRemote(username: string, type: PortfolioEntityType, id: 
   }
 }
 
-async function deleteEntityRemote(username: string, type: PortfolioEntityType, id: string): Promise<void> {
-  const res = await request(username, "entities.delete", { id, type, method: "DELETE" });
+async function deleteEntityRemote(username: string, type: PortfolioEntityType, id: string, signal?: AbortSignal): Promise<void> {
+  const res = await request(username, "entities.delete", { id, type, method: "DELETE", signal });
   if (!res.ok && res.status !== 404) {
     throw new VaultError(`El almacén remoto no ha confirmado el borrado de ${type}:${id} (error ${res.status}).`);
   }
@@ -268,7 +271,8 @@ export interface PortfolioSyncResult {
  * únicamente cuando el almacén ha confirmado TODAS las escrituras: si no se resuelve, el
  * guardado NO se ha completado.
  */
-export async function syncPortfolioEntities(username: string, body: PortfolioBody): Promise<PortfolioSyncResult> {
+export async function syncPortfolioEntities(username: string, body: PortfolioBody, signal?: AbortSignal): Promise<PortfolioSyncResult> {
+  signal?.throwIfAborted();
   const desired = await portfolioToEntities(body);
   const cache = syncedHashes.get(username) ?? new Map<string, string>();
   const seen = new Set<string>();
@@ -276,11 +280,13 @@ export async function syncPortfolioEntities(username: string, body: PortfolioBod
   // 1. Escritura de lo presente (solo si cambió respecto de la última sincronización).
   let saved = 0;
   for (const e of desired) {
+    signal?.throwIfAborted();
     const key = cacheKey(e.type, e.id);
     seen.add(key);
     const hash = await sha256Hex(utf8Bytes(stableStringify(e.entity)));
     if (cache.get(key) === hash) continue;
-    await putEntityRemote(username, e.type, e.id, e.entity);
+    await putEntityRemote(username, e.type, e.id, e.entity, signal);
+    signal?.throwIfAborted();
     cache.set(key, hash);
     saved++;
   }
@@ -290,11 +296,13 @@ export async function syncPortfolioEntities(username: string, body: PortfolioBod
   let deleted = 0;
   for (const type of PORTFOLIO_ENTITY_TYPES) {
     if (type === "settings") continue;
-    const remote = await listEntitiesRemote(username, type);
+    const remote = await listEntitiesRemote(username, type, signal);
     for (const rec of remote) {
       const key = cacheKey(type, rec.id);
       if (seen.has(key)) continue;
-      await deleteEntityRemote(username, type, rec.id);
+      signal?.throwIfAborted();
+      await deleteEntityRemote(username, type, rec.id, signal);
+      signal?.throwIfAborted();
       cache.delete(key);
       deleted++;
     }
@@ -309,10 +317,11 @@ export async function syncPortfolioEntities(username: string, body: PortfolioBod
  * estado remoto (cuenta nueva o primera migración desde el legado): en ese caso el llamante
  * conserva su estado local y debe hacer una primera sincronización para sembrar el remoto.
  */
-export async function loadPortfolioEntities(username: string): Promise<PortfolioBody | null> {
+export async function loadPortfolioEntities(username: string, signal?: AbortSignal): Promise<PortfolioBody | null> {
+  signal?.throwIfAborted();
   const groups = {} as Record<PortfolioEntityType, EntityRecord[]>;
   for (const type of PORTFOLIO_ENTITY_TYPES) {
-    groups[type] = await listEntitiesRemote(username, type);
+    groups[type] = await listEntitiesRemote(username, type, signal);
   }
   if (groups.settings.length === 0) return null; // sin marcador: aún no hay estado remoto
 

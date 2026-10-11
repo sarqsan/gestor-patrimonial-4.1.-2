@@ -19,7 +19,7 @@ export class MemoryBlobPort implements BlobPort {
     if (contentType !== pending.contentType) throw new Error("tipo no firmado");
     if (Date.now() > pending.validUntil) throw new Error("firma caducada");
     this.pendingPresigns.delete(pathname);
-    await this.putBytes(pathname, bytes, contentType);
+    await this.putBytes(pathname, bytes, contentType, { allowOverwrite: false });
   }
 
   async head(pathname: string): Promise<BlobObjectInfo | null> {
@@ -27,20 +27,23 @@ export class MemoryBlobPort implements BlobPort {
     return o ? { pathname, size: o.bytes.length, uploadedAt: o.uploadedAt, etag: o.etag } : null;
   }
 
-  async getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+  async getBytes(pathname: string): Promise<{ bytes: Uint8Array; contentType: string; etag?: string } | null> {
     const o = this.objects.get(pathname);
-    return o ? { bytes: o.bytes, contentType: o.contentType } : null;
+    return o ? { bytes: o.bytes.slice(), contentType: o.contentType, etag: o.etag } : null;
   }
 
-  async putBytes(pathname: string, bytes: Uint8Array, contentType: string): Promise<BlobObjectInfo> {
+  async putBytes(pathname: string, bytes: Uint8Array, contentType: string, options?: { allowOverwrite?: boolean; ifMatch?: string }): Promise<BlobObjectInfo> {
+    if (options?.ifMatch && this.objects.get(pathname)?.etag !== options.ifMatch) throw Object.assign(new Error("Versión de objeto antigua."), { name: "BlobPreconditionFailedError" });
+    if (options?.allowOverwrite === false && this.objects.has(pathname)) throw Object.assign(new Error("El objeto ya existe; no se sobrescribe."), { name: "BlobAlreadyExistsError" });
     this.putCalls++;
     const etag = createHash("md5").update(bytes).digest("hex");
     const uploadedAt = new Date().toISOString();
-    this.objects.set(pathname, { bytes, contentType, uploadedAt, etag });
+    this.objects.set(pathname, { bytes: bytes.slice(), contentType, uploadedAt, etag });
     return { pathname, size: bytes.length, uploadedAt, etag };
   }
 
-  async del(pathname: string): Promise<void> {
+  async del(pathname: string, options?: { ifMatch?: string }): Promise<void> {
+    if (options?.ifMatch && this.objects.get(pathname)?.etag !== options.ifMatch) throw Object.assign(new Error("Versión de objeto antigua."), { name: "BlobPreconditionFailedError" });
     this.objects.delete(pathname);
   }
 

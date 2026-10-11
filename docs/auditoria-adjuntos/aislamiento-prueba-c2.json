@@ -1,0 +1,15 @@
+{
+  "command": "solo C2 de remotePersistence.test.ts, con barrera de red",
+  "exit_code": 0,
+  "tests": 1,
+  "pass": 1,
+  "fail": 0,
+  "skipped": 0,
+  "guard": [
+    {
+      "testFile": "src/lib/remotePersistence.test.ts",
+      "externalFetchBlocked": 1,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

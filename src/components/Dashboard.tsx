@@ -1,7 +1,7 @@
 import { readApiJson } from "../lib/apiResponse";
-import { uploadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
+import { uploadAttachment, expenseReceiptFieldsFromStored, StoredAttachment } from "../lib/attachments";
 import { newAttachmentId } from "../lib/attachmentRules";
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { AppState, Property, PropertyExpense, getThemeColors, getEffectivePropertyFinancials } from "../types";
 import { 
   Building, 
@@ -42,7 +42,7 @@ import {
 
 interface DashboardProps {
   state: AppState;
-  onAddExpense: (newExpense: PropertyExpense) => void;
+  onAddExpense: (newExpense: PropertyExpense) => void | Promise<void>;
   onUpdateCurrentYear?: (year: number) => void;
   onLoadTaxDeclarationForYear?: (
     year: number,
@@ -83,6 +83,9 @@ export default function Dashboard({
     nif?: string;
   } | null>(null);
   const [savingScan, setSavingScan] = useState(false);
+  const savingScanRef = useRef(false);
+  const scanOperationIdRef = useRef<string | null>(null);
+  const uploadedScanRef = useRef<{ file: File; propertyId: string; stored: StoredAttachment } | null>(null);
   const [scanSuccess, setScanSuccess] = useState(false);
 
   // Form states for manual or file upload of tax declarations for posterior/anterior years
@@ -191,6 +194,7 @@ export default function Dashboard({
   };
 
   const handleFileScan = async (file: File) => {
+    if (savingScanRef.current) return;
     if (properties.length === 0) {
       setScanError("Debes registrar al menos un inmueble antes de escanear facturas.");
       return;
@@ -200,6 +204,8 @@ export default function Dashboard({
       setSelectedPropertyId(properties[0].id);
     }
     
+    scanOperationIdRef.current = null;
+    uploadedScanRef.current = null;
     setScannedFile(file);
     setScanning(true);
     setScanError(null);
@@ -242,7 +248,7 @@ export default function Dashboard({
   };
 
   const handleConfirmScan = async () => {
-    if (!extractedResult || savingScan) return;
+    if (!extractedResult || savingScanRef.current || scanSuccess) return;
 
     const propId = selectedPropertyId || properties[0]?.id;
     if (!propId) {
@@ -250,52 +256,35 @@ export default function Dashboard({
       return;
     }
 
+    savingScanRef.current = true;
     setSavingScan(true);
-
-    // La factura escaneada se guarda como justificante real en Storage antes del gasto.
-    let receiptFields: Partial<PropertyExpense> = {};
-    if (scannedFile) {
-      if (!state.currentUser) {
-        setScanError("No hay una sesión activa para guardar la factura.");
-        setSavingScan(false);
-        return;
-      }
-      try {
-        const stored = await uploadAttachment({
-          userId: state.currentUser,
-          folder: "expenses",
-          file: scannedFile,
-          attachmentId: newAttachmentId("rcpt"),
-          propertyId: propId,
-        });
-        receiptFields = expenseReceiptFieldsFromStored(stored);
-      } catch (err) {
-        setScanError(err instanceof Error ? err.message : "No se pudo guardar la factura. El gasto no se ha registrado.");
-        setSavingScan(false);
-        return;
-      }
+    setScanError(null);
+    const expenseId = scanOperationIdRef.current ??= newAttachmentId("exp");
+    try {
+      if (!scannedFile || !state.currentUser) throw new Error("Se necesita la factura y una sesión activa para confirmar el gasto.");
+      const cached = uploadedScanRef.current;
+      const stored = cached?.file === scannedFile && cached.propertyId === propId ? cached.stored : await uploadAttachment({
+        userId: state.currentUser, folder: "expenses", file: scannedFile, movementId: expenseId, propertyId: propId,
+      });
+      uploadedScanRef.current = { file: scannedFile, propertyId: propId, stored };
+      const newExpense: PropertyExpense = {
+        id: expenseId, propertyId: propId, category: extractedResult.category,
+        amount: Number(extractedResult.amount || 0), date: extractedResult.date,
+        description: `${extractedResult.description} (NIF: ${extractedResult.nif || 'No detectado'}) [AI-Scanner]`,
+        ...expenseReceiptFieldsFromStored(stored),
+      };
+      await onAddExpense(newExpense);
+      setScanSuccess(true);
+      setTimeout(() => {
+        setExtractedResult(null); setScannedFile(null); setScanSuccess(false);
+        scanOperationIdRef.current = null; uploadedScanRef.current = null;
+        savingScanRef.current = false; setSavingScan(false);
+      }, 1500);
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : "No se pudo confirmar la factura. Los datos se conservan para reintentar.");
+      savingScanRef.current = false;
+      setSavingScan(false);
     }
-
-    const newExpense: PropertyExpense = {
-      id: `exp_${Date.now()}`,
-      propertyId: propId,
-      category: extractedResult.category,
-      amount: Number(extractedResult.amount || 0),
-      date: extractedResult.date,
-      description: `${extractedResult.description} (NIF: ${extractedResult.nif || 'No detectado'}) [AI-Scanner]`,
-      ...receiptFields,
-    };
-
-    onAddExpense(newExpense);
-
-    setScanSuccess(true);
-    setTimeout(() => {
-      setExtractedResult(null);
-      setScannedFile(null);
-      setScanSuccess(false);
-    }, 1500);
-
-    setSavingScan(false);
   };
 
   // 1. Calculate Rent Received totals (Bruto & Neto) for the active year

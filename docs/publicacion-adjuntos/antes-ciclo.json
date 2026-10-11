@@ -1,0 +1,17 @@
+{
+  "scope": "parent CAS race; two actual Express instances, shared synthetic Blob; no external transport",
+  "exitCode": 1,
+  "summary": [
+    "not ok 1 - B28. Dos instancias: borrado prevalidado del padre pierde CAS tras confirmar un adjunto",
+    "# tests 1",
+    "# pass 0",
+    "# fail 1"
+  ],
+  "networkGuard": [
+    {
+      "testFile": "server/vault/attachmentBlockers.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

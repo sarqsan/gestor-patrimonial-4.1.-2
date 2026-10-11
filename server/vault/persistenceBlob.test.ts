@@ -186,7 +186,7 @@ test("P3. Subida directa: el servidor firma, descarga, recalcula el hash y solo 
     base,
     "POST",
     "/api/vault/files/presign",
-    { name: "contrato.pdf", contentType: "application/pdf", size: bytes.length, movementId: "mov_d" },
+    { id: "file_directo_ensayo", sha256: sha(bytes), name: "contrato.pdf", contentType: "application/pdf", size: bytes.length, movementId: "mov_d" },
     token
   );
   assert.equal(presign.status, 201);
@@ -199,17 +199,21 @@ test("P3. Subida directa: el servidor firma, descarga, recalcula el hash y solo 
   const earlyCommit = await json(base, "POST", `/api/vault/files/${fileId}/commit`, { size: bytes.length }, token);
   assert.equal(earlyCommit.status, 409, "sin archivo en el almacén la subida no se declara completada");
 
-  // Hash incorrecto: se descarta el objeto y NO se consolida.
+  // Hash incorrecto: NO se consolida, pero ningún objeto/reserva se borra.
   await port.directPut(`vault/users/cuenta_directa/contents/${fileId}`, bytes, "application/pdf");
   const badCommit = await json(base, "POST", `/api/vault/files/${fileId}/commit`, { size: bytes.length, sha256: "0".repeat(64) }, token);
   assert.equal(badCommit.status, 400);
-  assert.equal(await port.head(`vault/users/cuenta_directa/contents/${fileId}`), null, "el archivo no verificado se descarta");
-  assert.equal((await json(base, "GET", "/api/vault/files", undefined, token)).body.files.length, 0);
+  assert.ok(await port.head(`vault/users/cuenta_directa/contents/${fileId}`), "el archivo se conserva protegido, sin confirmarlo");
+  const pendingFiles = (await json(base, "GET", "/api/vault/files", undefined, token)).body.files;
+  assert.equal(pendingFiles.length, 1);
+  assert.equal(pendingFiles[0].sha256, "");
+  assert.equal((await fetch(`${base}/api/vault/files/${fileId}`, { headers: { authorization: `Bearer ${token}` } })).status, 404);
 
   // Reintento correcto (idempotente): misma reserva, contenido válido y hash correcto.
-  const presign2 = await json(base, "POST", "/api/vault/files/presign", { name: "contrato.pdf", contentType: "application/pdf", size: bytes.length }, token);
+  const presign2 = await json(base, "POST", "/api/vault/files/presign", { id: fileId, sha256: sha(bytes), name: "contrato.pdf", contentType: "application/pdf", size: bytes.length, movementId: "mov_d" }, token);
   const fileId2 = presign2.body.fileId as string;
-  await port.directPut(`vault/users/cuenta_directa/contents/${fileId2}`, bytes, "application/pdf");
+  assert.equal(fileId2, fileId, "reutiliza la reserva, no crea otro documento");
+  assert.equal(presign2.body.readyToCommit, true, "no vuelve a subir un objeto ya íntegro");
   const commit = await json(base, "POST", `/api/vault/files/${fileId2}/commit`, { size: bytes.length, sha256: sha(bytes) }, token);
   assert.equal(commit.status, 200);
   assert.equal(commit.body.file.sha256, sha(bytes));

@@ -1,0 +1,12 @@
+{
+  "scope": "diagnóstico hipotético en memoria; sin editar componente ni restaurar archivos",
+  "sourceUnchanged": true,
+  "withoutAnnotation": [
+    {
+      "code": 2339,
+      "line": 407,
+      "message": "Property 'format' does not exist on type '{ totalProperties?: number; totalPayments?: number; totalExpenses?: number; backedUpAt?: string; }'."
+    }
+  ],
+  "decision": "conservar anotación, necesaria con los tipos instalados"
+}

@@ -59,6 +59,7 @@ export default function RecoveryPreviewPanel({ state, currentUser }: Props) {
     totalPayments?: number;
     totalExpenses?: number;
     backedUpAt?: string;
+    format?: string;
   } | null>(null);
 
   const [recoveryPlan, setRecoveryPlan] = useState<RecoveryPlan | null>(null);

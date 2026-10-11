@@ -1,0 +1,68 @@
+name: Validación de adjuntos IBI en producción
+
+# Solo ejecución manual tras integrar/desplegar el commit autorizado. Nunca por push/PR.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: SHA completo integrado y esperado en producción
+        required: true
+        type: string
+      pr_number:
+        description: PR de la reparación para publicar evidencia sanitizada
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Verificar revisión solicitada
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$GITHUB_REF_NAME" = "main"
+      - name: Instalar herramientas de la prueba (sin modificar lock)
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.56.0
+          npx playwright install --with-deps chromium
+      - name: PDF ficticio, formulario, servidor y recuperación reales
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: node --import tsx scripts/validacion-adjuntos-produccion.mjs "$EXPECTED_COMMIT"
+      - name: Publicar evidencia sin credenciales en el PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          {
+            echo '<!-- validacion-adjuntos-produccion -->'
+            echo '### Validación real de adjuntos IBI'
+            echo "Commit esperado: \`$EXPECTED_COMMIT\`"
+            echo "Ejecución: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo '```json'
+            if test -f /tmp/adjuntos-produccion.json; then
+              cat /tmp/adjuntos-produccion.json
+            else
+              echo '{"ok":false,"blocked":"La prueba no llegó a ejecutarse; revisar el paso fallido de Actions."}'
+            fi
+            echo '```'
+          } > /tmp/evidencia-adjuntos.md
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@/tmp/evidencia-adjuntos.md

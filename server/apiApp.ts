@@ -79,6 +79,8 @@ async function generateContentWithRetry(
 }
 
 export interface ApiAppOptions {
+  /** Solo servidor: verificación autorizada Storage; no usa pruebas suministradas por el cliente. */
+  vaultStorageVerifier?: import("./vault/storageVerification.js").ServerStorageVerifier;
   /** Permite inyectar el destino del vault (pruebas de integración con un almacén simulado). */
   vaultPersistence?: VaultPersistence;
   /** Firma de subidas directas; por defecto la del almacén remoto configurado. */
@@ -113,6 +115,7 @@ export function createApiApp(options: ApiAppOptions = {}) {
     "/api/vault",
     createVaultRouter({
       persistence: vaultPersistence,
+      storageVerifier: options.vaultStorageVerifier,
       ...(vaultPresign ? { presign: vaultPresign } : {}),
     })
   );
@@ -394,7 +397,8 @@ Devuelve los importes como números decimales y las fechas en formato YYYY-MM-DD
 
   // Health route
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", time: new Date().toISOString() });
+    const sha = process.env.VERCEL_GIT_COMMIT_SHA;
+    res.json({ status: "ok", time: new Date().toISOString(), commit: sha && /^[a-f0-9]{40}$/i.test(sha) ? sha : null });
   });
 
   // Cualquier ruta /api no definida responde en JSON (nunca HTML ni texto plano).

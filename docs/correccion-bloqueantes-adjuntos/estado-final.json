@@ -1,0 +1,28 @@
+{
+  "branch": "arena/98d8e88d-gestor-patrimonial-4-1-2",
+  "head": "3a71b97495e98f250681b8280e4592958c5439d8",
+  "commitsSinceStart": 0,
+  "stagedFiles": [],
+  "trackedModified": 27,
+  "untrackedFiles": 43,
+  "deletedFiles": [],
+  "diffCheck": true,
+  "preCorrectionArchiveVerified": true,
+  "allBeforeFilesStillPresent": true,
+  "historicalDocsAndRecoveryUnchanged": {
+    "src/components/RecoveryPreviewPanel.tsx": true,
+    "docs/auditoria-adjuntos/aislamiento-prueba-c2.json": true,
+    "docs/auditoria-adjuntos/compilacion.json": true,
+    "docs/auditoria-adjuntos/comprobaciones-locales.mjs": true,
+    "docs/auditoria-adjuntos/diferencias-base-sanitizadas.patch": true,
+    "docs/auditoria-adjuntos/informe.md": true,
+    "docs/auditoria-adjuntos/pruebas-regresion.json": true,
+    "docs/auditoria-adjuntos/resultados-locales.json": true,
+    "docs/auditoria-adjuntos/solo-red-local.mjs": true,
+    "docs/reparacion-subida-documentos.md": true
+  },
+  "sourceInventoryHashesMatch": true,
+  "productionWrites": false,
+  "overallAcceptance": false,
+  "reason": "CICLO-01 fails and R6 regression remains; additional authorization required"
+}

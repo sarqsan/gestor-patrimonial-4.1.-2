@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Property, PropertyExpense, TenantContractRecord, getEffectivePropertyFinancials } from "../types";
 import { validateAttachment, newAttachmentId, contractPdfSource, hasAttachmentSource } from "../lib/attachmentRules";
-import { uploadAttachment, uploadBytesVerified, downloadAttachment } from "../lib/attachments";
+import { uploadAttachment, uploadBytesVerified, downloadAttachment, StoredAttachment } from "../lib/attachments";
+import type { PendingAttachmentReference } from "../lib/attachmentPersistence";
 import { externalizeImportedProperties } from "../lib/importAttachments";
 import {
   IMPORT_ACCEPT,
@@ -45,8 +46,8 @@ import {
 interface PropertiesProps {
   currentUser?: string;
   properties: Property[];
-  onAddProperty: (newProperty: Property) => void;
-  onEditProperty: (updatedProperty: Property) => void;
+  onAddProperty: (newProperty: Property, attachments?: PendingAttachmentReference[]) => void | Promise<void>;
+  onEditProperty: (updatedProperty: Property, attachments?: PendingAttachmentReference[]) => void | Promise<void>;
   onDeleteProperty: (id: string) => void;
   onDeleteExpense: (id: string) => void;
   onImportProperties?: (newProperties: Property[], mode: 'merge' | 'replace') => void;
@@ -110,6 +111,12 @@ export default function Properties({
   const [pendingDocFile, setPendingDocFile] = useState<File | null>(null);
   const [docError, setDocError] = useState<string | null>(null);
   const [docIsSaving, setDocIsSaving] = useState(false);
+  const docSavingRef = useRef(false);
+  const docDraftIdRef = useRef<string | null>(null);
+  const uploadedDocRef = useRef<{ file: File; propertyId: string; stored: StoredAttachment } | null>(null);
+  const uploadedContractRef = useRef<{ file: File; propertyId: string; stored: StoredAttachment } | null>(null);
+  const cardSavingRef = useRef(false);
+  const cardTenantIdRef = useRef<string | null>(null);
   const [uploadedFileName, setUploadedFileName] = useState("");
   const [uploadedFileSize, setUploadedFileSize] = useState("");
   const [uploadedFileType, setUploadedFileType] = useState("");
@@ -183,12 +190,15 @@ export default function Properties({
     e.target.value = "";
     if (!file) return;
     const invalid = validateAttachment(file);
+    if (docSavingRef.current) return;
     if (invalid) {
       setDocError(invalid);
       setDocUploadSuccess(false);
       return;
     }
     // Solo se selecciona aquí; la subida real a Storage ocurre al pulsar "Integrar Documento".
+    docDraftIdRef.current = newAttachmentId("doc");
+    uploadedDocRef.current = null;
     setDocError(null);
     setPendingDocFile(file);
     setUploadedFileName(file.name);
@@ -199,58 +209,35 @@ export default function Properties({
 
 
   const handleSaveDocument = async (prop: Property): Promise<boolean> => {
-    if (!pendingDocFile) return false;
-    if (!currentUser) {
-      setDocError("No hay una sesión activa para subir el documento.");
-      return false;
-    }
+    if (!pendingDocFile || docSavingRef.current) return false;
+    if (!currentUser) { setDocError("No hay una sesión activa para subir el documento."); return false; }
+    docSavingRef.current = true;
     setDocIsSaving(true);
     setDocError(null);
-    let stored;
+    const documentId = docDraftIdRef.current ??= newAttachmentId("doc");
     try {
-      stored = await uploadAttachment({
-        userId: currentUser,
-        folder: "property-documents",
-        file: pendingDocFile,
-        attachmentId: newAttachmentId("doc"),
+      const cached = uploadedDocRef.current;
+      const stored = cached?.file === pendingDocFile && cached.propertyId === prop.id ? cached.stored : await uploadAttachment({
+        userId: currentUser, folder: "property-documents", file: pendingDocFile, propertyId: prop.id,
       });
+      uploadedDocRef.current = { file: pendingDocFile, propertyId: prop.id, stored };
+      const newDoc = {
+        id: documentId, name: stored.name, size: uploadedFileSize, type: stored.contentType,
+        category: docCategory, year: docYear, uploadDate: new Date().toLocaleDateString('es-ES'),
+        storagePath: stored.mode === "storage" ? stored.storagePath : undefined,
+        vaultId: stored.mode === "vault" ? stored.vaultId : undefined, contentType: stored.contentType,
+      };
+      const updatedProp: Property = {
+        ...prop, documents: [...(prop.documents || []).filter((d) => d.id !== documentId), newDoc],
+      };
+      await onEditProperty(updatedProp, [{ storagePath: stored.storagePath, vaultId: stored.vaultId, propertyId: prop.id }]);
+      setPendingDocFile(null); setUploadedFileName(""); setUploadedFileSize(""); setUploadedFileType(""); setDocUploadSuccess(false);
+      uploadedDocRef.current = null; docDraftIdRef.current = null;
+      return true;
     } catch (err) {
-      setDocIsSaving(false);
-      setDocError(err instanceof Error ? err.message : "No se pudo subir el documento.");
+      setDocError(err instanceof Error ? err.message : "No se pudo confirmar el documento. El archivo y los datos se conservan.");
       return false;
-    }
-
-    const newDoc = {
-      id: `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      name: stored.name,
-      size: uploadedFileSize,
-      type: stored.contentType,
-      category: docCategory,
-      year: docYear,
-      uploadDate: new Date().toLocaleDateString('es-ES'),
-      // Cada modo escribe SU referencia y ninguna otra: vault (almacén remoto privado) o
-      // Storage (Firebase). No existe un modo local: si la subida no llega al destino remoto,
-      // no se registra el documento.
-      storagePath: stored.mode === "storage" ? stored.storagePath : undefined,
-      vaultId: stored.mode === "vault" ? stored.vaultId : undefined,
-      contentType: stored.contentType,
-    };
-
-    const updatedProp: Property = {
-      ...prop,
-      documents: [...(prop.documents || []), newDoc]
-    };
-
-    onEditProperty(updatedProp);
-    setDocIsSaving(false);
-
-    // Clear state
-    setPendingDocFile(null);
-    setUploadedFileName("");
-    setUploadedFileSize("");
-    setUploadedFileType("");
-    setDocUploadSuccess(false);
-    return true;
+    } finally { docSavingRef.current = false; setDocIsSaving(false); }
   };
 
   const handleDeleteDocument = (prop: Property, docId: string) => {
@@ -286,6 +273,7 @@ export default function Properties({
   const [newTenantPdfSize, setNewTenantPdfSize] = useState("");
 
   const handleToggleContractPanel = (prop: Property) => {
+    if (cardSavingRef.current) return;
     if (openContractPropertyId === prop.id) {
       setOpenContractPropertyId(null);
     } else {
@@ -314,34 +302,41 @@ export default function Properties({
   };
 
   const handleSaveCardContract = async (prop: Property): Promise<boolean> => {
+    if (cardSavingRef.current) return false;
+    cardSavingRef.current = true;
+    setCardIsSaving(true);
+    setCardError(null);
     let newPdfPath: string | undefined;
     let newPdfVaultId: string | undefined;
     if (cardPdfFile) {
       if (!currentUser) {
         setCardError("No hay una sesión activa para subir el contrato.");
+        cardSavingRef.current = false; setCardIsSaving(false);
         return false;
       }
       setCardIsSaving(true);
       setCardError(null);
       try {
-        const storedContract = await uploadAttachment({
+        const cached = uploadedContractRef.current;
+        const storedContract = cached?.file === cardPdfFile && cached.propertyId === prop.id ? cached.stored : await uploadAttachment({
           userId: currentUser,
           folder: "contracts",
           file: cardPdfFile,
-          attachmentId: newAttachmentId("ctr"),
           propertyId: prop.id,
         });
+        uploadedContractRef.current = { file: cardPdfFile, propertyId: prop.id, stored: storedContract };
         newPdfPath = storedContract.storagePath;
         newPdfVaultId = storedContract.vaultId;
       } catch (err) {
         setCardIsSaving(false);
         setCardError(err instanceof Error ? err.message : "No se pudo subir el contrato.");
+        cardSavingRef.current = false;
         return false;
       }
-      setCardIsSaving(false);
     }
-    const effectivePdfPath = newPdfPath || (cardPdfName ? cardPdfPath || undefined : undefined);
-    const effectivePdfVaultId = newPdfVaultId || (cardPdfName ? prop.contract?.pdfVaultId : undefined);
+    // Archivo nuevo => solo su proveedor; nunca conservar una referencia antigua prioritaria.
+    const effectivePdfPath = cardPdfFile ? newPdfPath : (cardPdfName ? cardPdfPath || undefined : undefined);
+    const effectivePdfVaultId = cardPdfFile ? newPdfVaultId : (cardPdfName ? prop.contract?.pdfVaultId : undefined);
     let updatedHistory: TenantContractRecord[] = prop.tenantHistory && prop.tenantHistory.length > 0
       ? [...prop.tenantHistory]
       : [];
@@ -357,8 +352,8 @@ export default function Properties({
         monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || prop.monthlyRent || 0),
         pdfName: cardPdfName || prop.contract?.pdfName,
         pdfSize: cardPdfSize || prop.contract?.pdfSize,
-        pdfPath: effectivePdfPath || prop.contract?.pdfPath,
-        pdfVaultId: effectivePdfVaultId || prop.contract?.pdfVaultId
+        pdfPath: cardPdfFile ? effectivePdfPath : effectivePdfPath || prop.contract?.pdfPath,
+        pdfVaultId: cardPdfFile ? effectivePdfVaultId : effectivePdfVaultId || prop.contract?.pdfVaultId
       });
     } else if (updatedHistory.length > 0) {
       // Update the latest existing record with the entered contract details
@@ -370,8 +365,8 @@ export default function Properties({
         monthlyRent: Number(cardMonthlyRent.toString().replace(",", ".") || updatedHistory[lastIdx].monthlyRent || 0),
         pdfName: cardPdfName || updatedHistory[lastIdx].pdfName,
         pdfSize: cardPdfSize || updatedHistory[lastIdx].pdfSize,
-        pdfPath: effectivePdfPath || updatedHistory[lastIdx].pdfPath,
-        pdfVaultId: effectivePdfVaultId || updatedHistory[lastIdx].pdfVaultId
+        pdfPath: cardPdfFile ? effectivePdfPath : effectivePdfPath || updatedHistory[lastIdx].pdfPath,
+        pdfVaultId: cardPdfFile ? effectivePdfVaultId : effectivePdfVaultId || updatedHistory[lastIdx].pdfVaultId
       };
     }
 
@@ -406,7 +401,7 @@ export default function Properties({
       }
 
       const newRecord: TenantContractRecord = {
-        id: `rec_tenant_${Date.now()}`,
+        id: cardPdfFile ? (cardTenantIdRef.current ??= newAttachmentId("rec_tenant")) : `rec_tenant_${Date.now()}`,
         tenantName: newTenantName.trim(),
         tenantDni: newTenantDni.trim(),
         startDate: newStartStr,
@@ -416,6 +411,7 @@ export default function Properties({
         pdfSize: newTenantPdfSize || undefined
       };
 
+      updatedHistory = updatedHistory.filter((r) => r.id !== newRecord.id);
       updatedHistory.push(newRecord);
 
       activeTenantName = newTenantName.trim();
@@ -441,7 +437,12 @@ export default function Properties({
       tenantHistory: updatedHistory
     };
 
-    onEditProperty(updatedProp);
+    try {
+      await onEditProperty(updatedProp, cardPdfFile ? [{ storagePath: newPdfPath, vaultId: newPdfVaultId, propertyId: prop.id }] : undefined);
+    } catch (err) {
+      setCardError(err instanceof Error ? err.message : "No se pudo confirmar el contrato. Los datos se conservan.");
+      return false;
+    } finally { cardSavingRef.current = false; setCardIsSaving(false); }
 
     // Reset transition fields
     setIsTenantChangeActive(false);
@@ -451,6 +452,9 @@ export default function Properties({
     setNewTenantMonthlyRent("");
     setNewTenantPdfName("");
     setNewTenantPdfSize("");
+    uploadedContractRef.current = null;
+    cardTenantIdRef.current = null;
+    return true;
   };
 
   const handleDeleteCardContract = (prop: Property) => {
@@ -590,9 +594,13 @@ export default function Properties({
   const [contractPdfPath, setContractPdfPath] = useState("");
   const [contractPdfError, setContractPdfError] = useState<string | null>(null);
   const [isSavingProperty, setIsSavingProperty] = useState(false);
+  const savingPropertyRef = useRef(false);
+  const draftPropertyIdRef = useRef<string | null>(null);
   const [contractPdfSize, setContractPdfSize] = useState("");
 
   const resetForm = () => {
+    draftPropertyIdRef.current = null;
+    uploadedContractRef.current = null;
     setAddress("");
     setCadastralReference("");
     setOwner('user1');
@@ -659,7 +667,13 @@ export default function Properties({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!address.trim() || isSavingProperty) return;
+    if (!address.trim() || savingPropertyRef.current) return;
+    const propertyId = editingId || (draftPropertyIdRef.current ??= newAttachmentId("prop"));
+    const existingProp = editingId ? properties.find(p => p.id === editingId) : undefined;
+    savingPropertyRef.current = true;
+    setIsSavingProperty(true);
+    setContractPdfError(null);
+    try {
 
     // Calculate Amortization amount based on Spanish law: 3% on construction value (acquisition cost minus land value)
     const safePrice = Number(purchasePrice.toString().replace(",", ".") || 0);
@@ -671,28 +685,14 @@ export default function Properties({
     let newContractPdfPath: string | undefined;
     let newContractPdfVaultId: string | undefined;
     if (contractPdfFile) {
-      if (!currentUser) {
-        setContractPdfError("No hay una sesión activa para subir el contrato.");
-        return;
-      }
-      setIsSavingProperty(true);
-      setContractPdfError(null);
-      try {
-        const storedPropContract = await uploadAttachment({
-          userId: currentUser,
-          folder: "contracts",
-          file: contractPdfFile,
-          attachmentId: newAttachmentId("ctr"),
-          propertyId: editingId || undefined,
-        });
-        newContractPdfPath = storedPropContract.storagePath;
-        newContractPdfVaultId = storedPropContract.vaultId;
-      } catch (err) {
-        setIsSavingProperty(false);
-        setContractPdfError(err instanceof Error ? err.message : "No se pudo subir el contrato. El inmueble no se ha guardado.");
-        return;
-      }
-      setIsSavingProperty(false);
+      if (!currentUser) throw new Error("No hay una sesión activa para subir el contrato.");
+      const cached = uploadedContractRef.current;
+      const storedPropContract = cached?.file === contractPdfFile && cached.propertyId === propertyId ? cached.stored : await uploadAttachment({
+        userId: currentUser, folder: "contracts", file: contractPdfFile, propertyId,
+      });
+      uploadedContractRef.current = { file: contractPdfFile, propertyId, stored: storedPropContract };
+      newContractPdfPath = storedPropContract.storagePath;
+      newContractPdfVaultId = storedPropContract.vaultId;
     }
 
     const hasContractData = contractStartDate || contractEndDate || contractMonthlyRent || contractPdfName;
@@ -704,11 +704,10 @@ export default function Properties({
         monthlyRent: Number(contractMonthlyRent.toString().replace(",", ".") || monthlyRent.toString().replace(",", ".") || 0),
         pdfName: contractPdfName || undefined,
         pdfSize: contractPdfSize || undefined,
-        pdfPath: newContractPdfPath || contractPdfPath || undefined,
-        pdfVaultId: newContractPdfVaultId || undefined,
+        pdfPath: contractPdfFile ? newContractPdfPath : contractPdfPath || undefined,
+        pdfVaultId: contractPdfFile ? newContractPdfVaultId : existingProp?.contract?.pdfVaultId,
       };
     }
-    const existingProp = editingId ? properties.find(p => p.id === editingId) : undefined;
     if (existingProp?.contract && !hasContractData) {
       finalContract = existingProp.contract;
     }
@@ -737,7 +736,7 @@ export default function Properties({
     }
 
     const propData: Property = {
-      id: editingId || `prop_${Date.now()}`,
+      id: propertyId,
       address,
       cadastralReference,
       owner,
@@ -760,13 +759,16 @@ export default function Properties({
     };
 
     if (editingId) {
-      onEditProperty(propData);
+      await onEditProperty(propData, contractPdfFile ? [{ storagePath: newContractPdfPath, vaultId: newContractPdfVaultId, propertyId }] : undefined);
       setEditingId(null);
     } else {
-      onAddProperty(propData);
+      await onAddProperty(propData, contractPdfFile ? [{ storagePath: newContractPdfPath, vaultId: newContractPdfVaultId, propertyId }] : undefined);
       setIsAdding(false);
     }
     resetForm();
+    } catch (err) {
+      setContractPdfError(err instanceof Error ? err.message : "No se pudo confirmar el contrato. Los datos se conservan para reintentar.");
+    } finally { savingPropertyRef.current = false; setIsSavingProperty(false); }
   };
 
   // Property Export handlers
@@ -971,6 +973,7 @@ export default function Properties({
       {/* FORM: ADD OR EDIT */}
       {(isAdding || editingId) && (
         <form onSubmit={handleSubmit} className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 sm:p-8 space-y-6 animate-slide-in">
+          <fieldset disabled={isSavingProperty} className="contents space-y-6">
           <div className="flex justify-between items-center border-b border-slate-700/60 pb-4">
             <h3 className="text-lg font-bold text-white flex items-center">
               <Building className="w-5 h-5 text-indigo-400 mr-2" />
@@ -1369,6 +1372,7 @@ export default function Properties({
               <span>{editingId ? "Sincronizar Cambios" : "Guardar e Integrar"}</span>
             </button>
           </div>
+          </fieldset>
         </form>
       )}
 
@@ -1612,6 +1616,7 @@ export default function Properties({
                       </button>
 
                       <button
+                        disabled={docIsSaving || cardIsSaving}
                         onClick={() => {
                           setOpenDocsPropertyId(isDocsOpen ? null : prop.id);
                           setOpenFinancialsPropertyId(null);
@@ -1914,7 +1919,7 @@ export default function Properties({
 
                   {/* BLOC RECIBOS Y DOCUMENTOS EXPANDIDO */}
                   {isDocsOpen && (
-                    <div className="w-full bg-slate-900/80 border border-blue-500/20 rounded-2xl p-5 mt-4 space-y-4 animate-slide-in text-left">
+                    <fieldset disabled={docIsSaving} className="w-full min-w-0 bg-slate-900/80 border border-blue-500/20 rounded-2xl p-5 mt-4 space-y-4 animate-slide-in text-left">
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-800 pb-3 gap-2">
                         <div className="flex items-center space-x-2">
                           <Upload className="w-5 h-5 text-blue-400" />
@@ -1964,6 +1969,7 @@ export default function Properties({
                                 type="file"
                                 accept=".pdf,image/jpeg,image/png"
                                 onChange={handleUploadDocLocal}
+                                disabled={docIsSaving}
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                               />
                               {docIsUploading ? (
@@ -1975,7 +1981,7 @@ export default function Properties({
                                 <div className="space-y-1.5">
                                   <div className="flex items-center justify-center space-x-1 text-emerald-400">
                                     <CheckCircle className="w-4 h-4" />
-                                    <span className="text-[11px] font-bold">¡Archivo adjuntado con éxito!</span>
+                                    <span className="text-[11px] font-bold">Archivo seleccionado; pendiente de guardar</span>
                                   </div>
                                   <p className="text-xs font-semibold text-slate-200 truncate max-w-[240px] mx-auto">{uploadedFileName}</p>
                                   <p className="text-[10px] text-slate-500 font-mono">{uploadedFileSize}</p>
@@ -1990,12 +1996,13 @@ export default function Properties({
                             </div>
                           </div>
 
+                          {docError && <p role="alert" className="text-xs text-rose-300">{docError}</p>}
                           <button
                             type="button"
                             disabled={!pendingDocFile || docIsSaving}
                             onClick={async () => {
                               const ok = await handleSaveDocument(prop);
-                              if (ok) alert("Documento subido a Firebase Storage y registrado en el inmueble. Revisa el estado de guardado en la parte superior.");
+                              if (ok) alert("Documento verificado y asociado al inmueble en almacenamiento remoto.");
                             }}
                             className="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
                           >
@@ -2093,7 +2100,7 @@ export default function Properties({
                           </div>
                         </div>
                       </div>
-                    </div>
+                    </fieldset>
                   )}
 
                   {/* BLOC FISCAL EXPANDIDO ALINEADO CON EL MODELO 100 */}
@@ -2303,7 +2310,7 @@ export default function Properties({
 
                   {/* BLOC CONTRATO EXPANDIDO */}
                   {openContractPropertyId === prop.id && (
-                    <div className="w-full bg-slate-900/80 border border-emerald-500/20 rounded-2xl p-5 mt-4 space-y-5 animate-slide-in text-left">
+                    <fieldset disabled={cardIsSaving} className="w-full min-w-0 bg-slate-900/80 border border-emerald-500/20 rounded-2xl p-5 mt-4 space-y-5 animate-slide-in text-left">
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-slate-800 pb-3 gap-2">
                         <div className="flex items-center space-x-2">
                           <FileText className="w-5 h-5 text-emerald-400" />
@@ -2585,7 +2592,7 @@ export default function Properties({
                           </div>
                         </div>
                       </div>
-                    </div>
+                    </fieldset>
                   )}
 
                 </div>

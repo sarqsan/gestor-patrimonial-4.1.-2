@@ -1,0 +1,41 @@
+[
+  {
+    "command": "npm run lint",
+    "exitCode": 0,
+    "elapsedSeconds": 14.753,
+    "networkGuard": [
+      {
+        "testFile": null,
+        "externalFetchBlocked": 0,
+        "externalSocketBlocked": 0
+      },
+      {
+        "testFile": null,
+        "externalFetchBlocked": 0,
+        "externalSocketBlocked": 0
+      }
+    ]
+  },
+  {
+    "command": "npm run build",
+    "exitCode": 0,
+    "elapsedSeconds": 8.425,
+    "networkGuard": [
+      {
+        "testFile": null,
+        "externalFetchBlocked": 0,
+        "externalSocketBlocked": 0
+      },
+      {
+        "testFile": null,
+        "externalFetchBlocked": 0,
+        "externalSocketBlocked": 0
+      },
+      {
+        "testFile": null,
+        "externalFetchBlocked": 0,
+        "externalSocketBlocked": 0
+      }
+    ]
+  }
+]

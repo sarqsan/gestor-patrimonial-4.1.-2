@@ -1,0 +1,32 @@
+{
+  "phase": "before",
+  "exit_code": 1,
+  "cases": [
+    "not ok 1 - B01 (L06). Referencia Storage inexistente se rechaza sin confirmar gasto",
+    "not ok 2 - B02 (L06). Referencia Storage de otra cuenta no se autoriza por datos del cliente",
+    "not ok 3 - B03 (L07). Documento v\u00e1lido no permite asociar un gasto a inmueble remoto inexistente",
+    "not ok 4 - B04 (L07). Inmueble existente solo en otra cuenta no sirve como padre autorizado",
+    "not ok 5 - B05 (L09). Omisi\u00f3n de attachmentIds no evita verificar el documento privado",
+    "not ok 6 - B06 (L09). attachmentIds vac\u00edo tampoco evita comprobar TODOS los documentos",
+    "not ok 7 - B07 (L08). Snapshot legacy del mismo gasto no retira una referencia confirmada",
+    "not ok 8 - B08 (L10). Snapshot viejo de inmueble se rechaza conservando documento y datos",
+    "not ok 9 - B09 (L11). Logout revoca la credencial conservada; otra sesi\u00f3n/cuenta sigue v\u00e1lida",
+    "not ok 10 - B10 (L11). Otro usuario no puede revocar una credencial ajena desde el body",
+    "not ok 11 - B11 (L13). ZIP rechaza bytes alterados, sin modificar ni borrar el original",
+    "not ok 12 - B12 (L13). ZIP no incluye una reserva de upload a\u00fan no confirmada",
+    "not ok 13 - B13 (L14). Reintentos legacy sin ID reutilizan contenido/contexto y una operaci\u00f3n",
+    "not ok 14 - B14 (L14). Legacy concurrente en dos instancias no duplica ni sustituye objeto",
+    "ok 15 - B15 (L14). Nombre/tama\u00f1o iguales no fusionan bytes ni intenciones diferentes",
+    "ok 16 - B16. Recuperaci\u00f3n intacta y no acceso cruzado despu\u00e9s de commit/retry"
+  ],
+  "network_guard": {
+    "testFile": "server/vault/attachmentBlockers.test.ts",
+    "externalFetchBlocked": 0,
+    "externalSocketBlocked": 0
+  },
+  "tests": 16,
+  "pass": 2,
+  "fail": 14,
+  "cancelled": 0,
+  "skipped": 0
+}

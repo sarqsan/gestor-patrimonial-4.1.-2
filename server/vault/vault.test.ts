@@ -315,6 +315,9 @@ function readStoreZip(buf: Buffer): Map<string, { bytes: Buffer; crc: number }> 
 test("E8. Expediente completo en un único ZIP: movimientos + documentos vinculados", async () => {
   const token = await registerAndLogin("cuenta_zip", "clave_z_1");
 
+  const parent = await json("POST", "/api/vault/entities", { type: "properties", id: "p1", entity: { id: "p1", address: "INMUEBLE FICTICIO" } }, token);
+  assert.equal(parent.status, 201, "padre remoto autorizado del expediente");
+
   const bytesA = new Uint8Array(1024);
   for (let i = 0; i < bytesA.length; i++) bytesA[i] = (i * 31) % 256;
   const upA = await json(
@@ -331,7 +334,7 @@ test("E8. Expediente completo en un único ZIP: movimientos + documentos vincula
   const upB = await json(
     "POST",
     "/api/vault/files",
-    { name: "contrato_zip.pdf", contentType: "application/pdf", bytesBase64: Buffer.from(bytesB).toString("base64") },
+    { name: "contrato_zip.pdf", contentType: "application/pdf", bytesBase64: Buffer.from(bytesB).toString("base64"), movementId: "exp_zip_2", propertyId: "p1" },
     token
   );
   assert.equal(upB.status, 201);

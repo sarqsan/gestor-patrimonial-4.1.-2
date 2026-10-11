@@ -1,0 +1,125 @@
+{
+  "branch": "arena/98d8e88d-gestor-patrimonial-4-1-2",
+  "head": "3a71b97495e98f250681b8280e4592958c5439d8",
+  "preservedFiles": 42,
+  "archiveVerified": true,
+  "archiveBytes": 379430,
+  "changedDuringCorrection": [
+    {
+      "path": "package.json",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "1345f8cd15f15d9937bb206495d479ea6ebd15fe89611c3fec482a068c4446f1",
+      "beforeSha256": "f4443c27b2cf3bf72a0355eed9a4b8bf261951c2434b904dbfbdcd9764395cbe"
+    },
+    {
+      "path": "server/apiApp.ts",
+      "kind": "tracked clean before correction",
+      "afterSha256": "8be9ba425cbc4a9fef1ca6a8d709f849020af0be0d9a12df44d74170ea3d042e",
+      "beforeSha256": "18f40b24a24a7c272cc9a6485c3899e7aa99b3ea8cea2a0ac480d47b24af6fc8"
+    },
+    {
+      "path": "server/vault/attachmentFlow.test.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "852d27b50e0ab36bf408357077b0d562e44eeb42def82d4c208ecc302a05eddd",
+      "beforeSha256": "e07b0f2b51b8e1461493617548223dbc867eaa222863f556add12ae2e8195914"
+    },
+    {
+      "path": "server/vault/auth.ts",
+      "kind": "tracked clean before correction",
+      "afterSha256": "9583e1bb72ebdd1169c57a3b60e2f43467d10bd1c655dfc8c28caa051ba1d090",
+      "beforeSha256": "76c6157f1fe3297a5892968c67c36d27401f7e1922aac9e2293e31197dadd547"
+    },
+    {
+      "path": "server/vault/blobPort.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "e0a87ab42274a33b464a9c09983b3619266327144422bc1089026cb4caab7f71",
+      "beforeSha256": "8c53f117db7bb58ef100000fef888a6670b83089e0d75e97aec88ab6a179da8c"
+    },
+    {
+      "path": "server/vault/memoryBlobPort.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "92217b69ba8b71abaae5f1c730240d2d752599cdb154a4b6ad140b7359582060",
+      "beforeSha256": "3405abc2d91e1af54d0f0612d4a14069133bd979a814099495e5ef5da88318a7"
+    },
+    {
+      "path": "server/vault/patrimonialIntegration.test.ts",
+      "kind": "tracked clean before correction",
+      "afterSha256": "c6fe6e7cd3505ad53a4729bf2ee1eb5c885c87f421d8902c9d8d45ae14da4487",
+      "beforeSha256": "dd3c99cff3395043e6ae9b4301ca7659694d28edbd80cc9aa965e9cd30561e71"
+    },
+    {
+      "path": "server/vault/persistence.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "8fec80f5fe90b2148cc347be3543aa6bfafe8194b64e2bde843491de94f4c82c",
+      "beforeSha256": "57b64ad132339953c6e1ddd73fd831d0933fd57dbc966477063c9e340b1a3005"
+    },
+    {
+      "path": "server/vault/persistenceTypes.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "63782cac7c6b337b3a7f236a19698275cdc1e103c451f0e6bcfdffe2d9d5af22",
+      "beforeSha256": "ede45329ffc90e6a7388f90a4f8dd18320421e28f89c53f909214cb8212f418f"
+    },
+    {
+      "path": "server/vault/routes.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "7193c35108f3eafc30dcf96e2f9915e0389cf3b15963fb35279aeb7053b8fede",
+      "beforeSha256": "cc682b7e5d3fba2dbd4f8e2d23ef73fe4b0f6df0634a99e2305f71fcecdbe239"
+    },
+    {
+      "path": "server/vault/vault.test.ts",
+      "kind": "tracked clean before correction",
+      "afterSha256": "39cc9156c893ebef14aebce6128adb9c9e0cc157ea042996b9130f8627b1cce7",
+      "beforeSha256": "50d57468f7dd7e527cba683078122f24d335865f7058c1c8b9555664a848d2b6"
+    },
+    {
+      "path": "src/App.tsx",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "2f5c3b963548e1de6db5916c69004c04f49aeca401799c7b1b5f9876da849182",
+      "beforeSha256": "6b30fa69d4797f660c8290d94d19d92684d06627f1ac1df142c6bc666295ae9e"
+    },
+    {
+      "path": "src/lib/attachmentPersistence.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "1c0548abd457a60e1f281b341626b8860d8e364dcd70dd88b54b2040b8d1d518",
+      "beforeSha256": "372917ec2a635a147e0ab2d1b2c0a68b0d6d936d61f61e108b25dae84fd130df"
+    },
+    {
+      "path": "src/lib/remotePersistence.test.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "5187d2c69aa27148017f819a7a26c1d9acfe7b9447b2678da4330c5a03bec991",
+      "beforeSha256": "83a47373cb16ab5ce315ba3b8b83f19446b85523c2361547e6366dbbd20a61e0"
+    },
+    {
+      "path": "src/lib/vaultClient.test.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "b7bbea9a589e90df3c613165db33dffcc524f5b84c9582889f2467bd8fc34d35",
+      "beforeSha256": "4cde82366d93970b5837e80f4972fa817e48108766e61aebe3001add3b43a64f"
+    },
+    {
+      "path": "src/lib/vaultClient.ts",
+      "kind": "existing earlier worktree file",
+      "afterSha256": "a346defccf45fca4ca6f2718a8594ecc5e903809fb7f07328675000120ed1d1b",
+      "beforeSha256": "2e507ea5a6aa9acb56d0300b0663f0dad803f0de0f1cd59bfa5475e8881d4ecb"
+    }
+  ],
+  "addedDuringCorrection": [
+    {
+      "path": "server/vault/attachmentBlockers.test.ts",
+      "kind": "new correction file",
+      "afterSha256": "f37e17ef314878fed23b0af32bfb8110b172e39f8bf1285976ce87455d500680",
+      "beforeSha256": null
+    },
+    {
+      "path": "server/vault/attachmentSafety.ts",
+      "kind": "new correction file",
+      "afterSha256": "0379fe033eaada98919c7a8933ffc2755756e5dbdf7f9ecf0ffa3f108b055831",
+      "beforeSha256": null
+    },
+    {
+      "path": "server/vault/storageVerification.ts",
+      "kind": "new correction file",
+      "afterSha256": "cb5af44a159bda9399bad68bfc1c64b33b58fc69664fd90f55f75d73fb2cef00",
+      "beforeSha256": null
+    }
+  ]
+}

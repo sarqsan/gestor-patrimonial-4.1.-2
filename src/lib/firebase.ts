@@ -14,6 +14,10 @@ export const auth = getAuth(app);
 
 // Firebase Storage usa el storageBucket de firebase-applet-config.json (no se inventa ningún bucket).
 export const storage = getStorage(app);
+// No dejar reintentos del SDK (por defecto minutos) vivos tras los plazos del formulario.
+// GET metadata no admite cancelación pública: su presupuesto interno es menor que el plazo de 15 s.
+storage.maxOperationRetryTime = 10_000;
+storage.maxUploadRetryTime = 60_000;
 
 /**
  * Punto de inyección del mecanismo de inicio de sesión.

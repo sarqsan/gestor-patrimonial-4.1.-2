@@ -1,0 +1,27 @@
+{
+  "command": "npm run build",
+  "exitCode": 0,
+  "elapsedSeconds": 13.102,
+  "summary": [
+    "(!) Some chunks are larger than 500 kB after minification. Consider:",
+    "✓ built in 12.47s",
+    "⚡ Done in 19ms"
+  ],
+  "networkGuard": [
+    {
+      "testFile": null,
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    },
+    {
+      "testFile": null,
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    },
+    {
+      "testFile": null,
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

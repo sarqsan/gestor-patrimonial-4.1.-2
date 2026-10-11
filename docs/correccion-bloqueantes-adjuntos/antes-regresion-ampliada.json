@@ -1,0 +1,72 @@
+{
+  "scope": "exact before-worktree reconstructed from HEAD + verified 42-file archive; current expanded tests, no checkout/stash",
+  "branch": "arena/98d8e88d-gestor-patrimonial-4-1-2",
+  "baseHead": "3a71b97495e98f250681b8280e4592958c5439d8",
+  "archiveFilesVerified": 42,
+  "exitCode": 1,
+  "elapsedSeconds": 7.846,
+  "summaries": [
+    "# tests 42",
+    "# pass 12",
+    "# fail 30",
+    "# cancelled 0",
+    "# skipped 0",
+    "# duration_ms 7805.656121"
+  ],
+  "cases": [
+    "not ok 1 - B01 (L06). Referencia Storage inexistente se rechaza sin confirmar gasto",
+    "not ok 2 - B02 (L06). Referencia Storage de otra cuenta no se autoriza por datos del cliente",
+    "not ok 3 - B03 (L07). Documento válido no permite asociar un gasto a inmueble remoto inexistente",
+    "not ok 4 - B04 (L07). Inmueble existente solo en otra cuenta no sirve como padre autorizado",
+    "not ok 5 - B05 (L09). Omisión de attachmentIds no evita verificar el documento privado",
+    "not ok 6 - B06 (L09). attachmentIds vacío tampoco evita comprobar TODOS los documentos",
+    "not ok 7 - B07 (L08). Snapshot legacy del mismo gasto no retira una referencia confirmada",
+    "not ok 8 - B08 (L10). Snapshot viejo de inmueble se rechaza conservando documento y datos",
+    "not ok 9 - B09 (L11). Logout revoca la credencial conservada; otra sesión/cuenta sigue válida",
+    "not ok 10 - B10 (L11). Otro usuario no puede revocar una credencial ajena desde el body",
+    "not ok 11 - B11 (L13). ZIP rechaza bytes alterados, sin modificar ni borrar el original",
+    "not ok 12 - B12 (L13). ZIP no incluye una reserva de upload aún no confirmada",
+    "not ok 13 - B13 (L14). Reintentos legacy sin ID reutilizan contenido/contexto y una operación",
+    "not ok 14 - B14 (L14). Legacy concurrente en dos instancias no duplica ni sustituye objeto",
+    "ok 15 - B15 (L14). Nombre/tamaño iguales no fusionan bytes ni intenciones diferentes",
+    "ok 16 - B16. Recuperación intacta y no acceso cruzado después de commit/retry",
+    "not ok 17 - B17. ETag obsoleto no puede sustituir una asociación nueva, tampoco en el commit individual",
+    "not ok 18 - B18. Dos escritores CAS contra la misma versión solo confirman uno y conservan el documento",
+    "not ok 19 - B19. Reserva directa legacy sin ID ni SHA se rechaza; con SHA reintenta la misma reserva",
+    "not ok 20 - B20. Revocación no cambia el secreto ni otra sesión de la MISMA cuenta",
+    "not ok 21 - B21. Fallo de lectura de revocación falla cerrado; no reutiliza una sesión por caché",
+    "ok 22 - B22. Registro de usuario concurrente no cambia la cuenta ganadora ni su credencial",
+    "not ok 23 - B23. Snapshot de borrado no elimina un inmueble que conserva documentos",
+    "not ok 24 - B24 Storage-verifier AUTORITATIVO simulado: valid; body no decide el resultado",
+    "not ok 25 - B24 Storage-verifier AUTORITATIVO simulado: missing; body no decide el resultado",
+    "not ok 26 - B24 Storage-verifier AUTORITATIVO simulado: foreign; body no decide el resultado",
+    "not ok 27 - B24 Storage-verifier AUTORITATIVO simulado: corrupted; body no decide el resultado",
+    "not ok 28 - B24 Storage-verifier AUTORITATIVO simulado: context; body no decide el resultado",
+    "not ok 29 - B24 Storage-verifier AUTORITATIVO simulado: no-generation; body no decide el resultado",
+    "not ok 30 - B25. ZIP rechaza fichero con metadatos válidos cuyo documento ya no figura en su inmueble",
+    "not ok 31 - B26. Revocación ilegible/corrupta falla cerrado, no revalida una credencial retenida",
+    "ok 32 - C1. Primer uso: login 401 → alta → re-login guarda el token y marca el usuario activo",
+    "ok 33 - C2. Token existente válido: se reutiliza sin volver a hacer login",
+    "ok 34 - C3. clearVaultToken elimina la sesión del usuario",
+    "ok 35 - C4. vaultUploadFile envía bytes Base64, trazabilidad y token Bearer; devuelve la referencia",
+    "ok 36 - C5. Sin sesión, las operaciones del vault fallan con VaultAuthError y sin llamadas de red",
+    "ok 37 - C6. vaultDownloadFile traduce 401 a sesión caducada y 404 a error de vault",
+    "ok 38 - C7. flushQueuedReceiptsToVault externaliza solo los comprobantes en cola local",
+    "ok 39 - C8. flushQueuedReceiptsToVault sin sesión no toca nada (devuelve 0, sin red)",
+    "not ok 40 - Logout: servidor confirma antes de retirar credencial; no borra otras cuentas",
+    "not ok 41 - Logout: fallo de red/503 conserva credencial; respuesta perdida reintenta y acepta 401 revocado",
+    "ok 42 - Commit de adjunto no legitima snapshot antiguo con una lectura ETag inmediatamente anterior"
+  ],
+  "networkGuard": [
+    {
+      "testFile": "server/vault/attachmentBlockers.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    },
+    {
+      "testFile": "src/lib/vaultClient.test.ts",
+      "externalFetchBlocked": 0,
+      "externalSocketBlocked": 0
+    }
+  ]
+}

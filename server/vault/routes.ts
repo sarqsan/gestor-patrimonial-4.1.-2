@@ -20,7 +20,9 @@
 //    tipo y tamaño acotados y caducidad corta; el servidor recalcula el SHA-256 de lo recibido.
 //  - Los errores no incluyen datos fiscales ni secretos; la auditoría guarda solo identificadores.
 import { Router, Request, Response, NextFunction } from "express";
-import { createSessionToken, verifySessionToken, normalizeUsername, passwordProblem, hashPassword } from "./auth.js";
+import { createSessionToken, verifySessionToken, verifySessionClaims, normalizeUsername, passwordProblem, hashPassword } from "./auth.js";
+import { VaultConflictError, expenseReferences, propertyReferences, type RemoteDocumentReference } from "./attachmentSafety.js";
+import { verifyStorageReference, VaultAttachmentPolicyError, type ServerStorageVerifier } from "./storageVerification.js";
 import { buildZip, type ZipEntry } from "./zip.js";
 import {
   VaultStorageUnavailableError,
@@ -34,6 +36,7 @@ import type { VaultAuditEvent, VaultFileMeta, VaultPersistence } from "./persist
 
 export interface VaultRouterOptions {
   persistence: VaultPersistence;
+  storageVerifier?: ServerStorageVerifier;
   /** Secreto HMAC para firmar sesiones. Si no se pasa, se genera/persiste en el almacén. */
   secret?: string;
   /** Firma de subidas directas (solo disponible con almacén remoto). */
@@ -78,8 +81,12 @@ export const VAULT_OPERATION_SPECS: Record<string, VaultOpSpec> = {
   health: { methods: ["GET"], path: "/health" },
   "auth.register": { methods: ["POST"], path: "/auth/register" },
   "auth.login": { methods: ["POST"], path: "/auth/login" },
+  "auth.logout": { methods: ["POST"], path: "/auth/logout" },
+  "movimientos.get": { methods: ["GET"], path: (id) => `/movimientos/${id}`, requiresId: true },
+  "entities.get": { methods: ["GET"], path: (id) => `/entities/${id}`, requiresId: true },
   session: { methods: ["GET"], path: "/session" },
   movimientos: { methods: ["GET", "PUT"], path: "/movimientos" },
+  "movimientos.save": { methods: ["PUT"], path: (id) => `/movimientos/${id}`, requiresId: true },
   "entities.list": { methods: ["GET"], path: "/entities" },
   "entities.put": { methods: ["POST"], path: "/entities" },
   "entities.delete": { methods: ["DELETE"], path: (id) => `/entities/${id}`, requiresId: true },
@@ -88,6 +95,7 @@ export const VAULT_OPERATION_SPECS: Record<string, VaultOpSpec> = {
   "files.upload": { methods: ["POST"], path: "/files" },
   "files.presign": { methods: ["POST"], path: "/files/presign" },
   "files.commit": { methods: ["POST"], path: (id) => `/files/${id}/commit`, requiresId: true },
+  "files.verify": { methods: ["GET"], path: (id) => `/files/${id}/verify`, requiresId: true },
   "files.get": { methods: ["GET"], path: (id) => `/files/${id}`, requiresId: true },
   "files.delete": { methods: ["DELETE"], path: (id) => `/files/${id}`, requiresId: true },
   expediente: { methods: ["GET"], path: "/expediente" },
@@ -141,7 +149,8 @@ async function authedUser(req: Request, persistence: VaultPersistence, secret: s
   if (!user) return null;
   // Defensa en profundidad: el usuario del token debe existir.
   const record = await persistence.getUser(user);
-  return record ? user : null;
+  if (!record || await persistence.isSessionRevoked(user, sha256Hex(new TextEncoder().encode(m[1].trim())))) return null;
+  return user;
 }
 
 function badRequest(res: Response, message: string): void {
@@ -188,6 +197,32 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     } catch (err) {
       next(err);
     }
+  };
+
+  const verifyReference = async (actor: string, source: RemoteDocumentReference): Promise<void> => {
+    if (source.vaultId && source.storagePath) throw new VaultAttachmentPolicyError("attachment/ambiguous-provider", "El documento mezcla proveedores; no se confirma.");
+    if (source.vaultId) {
+      if (!safeSegment(source.vaultId)) throw new VaultAttachmentPolicyError("attachment/invalid-reference", "Identificador de documento no válido.");
+      const stored = await readVerifiedFile(persistence, actor, source.vaultId);
+      if (!stored) throw new VaultAttachmentPolicyError("attachment/required", "El documento obligatorio no existe o no está confirmado para esta cuenta.");
+      if ((stored.meta.propertyId && source.propertyId && stored.meta.propertyId !== source.propertyId) ||
+          (stored.meta.movementId && source.movementId && stored.meta.movementId !== source.movementId))
+        throw new VaultAttachmentPolicyError("attachment/association-conflict", "El documento pertenece a otro inmueble o gasto.");
+    } else if (source.storagePath) await verifyStorageReference(actor, source, options.storageVerifier);
+    else throw new VaultAttachmentPolicyError("attachment/required", "Falta el documento remoto obligatorio.");
+  };
+  const verifyMovement = async (actor: string, movement: any): Promise<void> => {
+    const refs = expenseReferences(movement); if (!refs.length) return;
+    if (!safeSegment(movement?.id) || !safeSegment(movement?.propertyId)) throw new VaultAttachmentPolicyError("attachment/invalid-reference", "ID de gasto/inmueble no válido.");
+    const property = await persistence.getEntity(actor, "properties", movement.propertyId);
+    if (!property || (property.data as any)?.id !== movement.propertyId) throw new VaultAttachmentPolicyError("attachment/parent-not-found", "El inmueble no existe en la cartera autorizada.");
+    for (const ref of refs) await verifyReference(actor, ref);
+  };
+  const verifyProperty = async (actor: string, id: string, entity: any): Promise<void> => {
+    const refs = propertyReferences(entity);
+    if (!refs.length) return;
+    if (entity.id !== id) throw new VaultAttachmentPolicyError("attachment/invalid-reference", "La entidad y los documentos no corresponden al mismo inmueble.");
+    for (const ref of refs) await verifyReference(actor, { ...ref, propertyId: id });
   };
 
   // ---------- traducción de la forma compatible (?op=) ----------
@@ -295,6 +330,18 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  router.post("/auth/logout", requireAuth, async (req: Request, res, next) => {
+    try {
+      const raw = /^Bearer\s+(.+)$/i.exec(req.get("authorization") || "")?.[1]?.trim();
+      if (!raw) return res.status(401).json({ ok: false, error: "Sesión no válida." });
+      const claims = verifySessionClaims(await getSecret(), raw);
+      if (!claims || claims.sub !== (req as any).vaultUser) return res.status(401).json({ ok: false, error: "Sesión no válida." });
+      // Nunca usa token/usuario del body ni rota una clave compartida.
+      await persistence.revokeSession({ username: claims.sub, tokenHash: sha256Hex(new TextEncoder().encode(raw)), expiresAt: claims.exp });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   // ---------- autenticados ----------
   router.get("/session", requireAuth, (req: Request, res) => {
     res.json({
@@ -314,18 +361,54 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  router.get("/movimientos/:movementId", requireAuth, async (req: Request, res, next) => {
+    try {
+      const row = await persistence.getMovement((req as any).vaultUser, req.params.movementId);
+      if (!row) return res.status(404).json({ ok: false, error: "El gasto no existe en esta cartera." });
+      res.setHeader("etag", row.version); res.setHeader("cache-control", "private, no-store");
+      res.json({ ok: true, movement: row.data, version: row.version });
+    } catch (err) { next(err); }
+  });
+
   router.put("/movimientos", requireAuth, async (req: Request, res, next) => {
     try {
       const user = (req as any).vaultUser;
       const movements = req.body?.movements;
       if (!Array.isArray(movements)) return badRequest(res, "Se espera una lista de movimientos.");
       if (movements.length > 20_000) return badRequest(res, "Demasiados movimientos en una sola sincronización.");
-      const saved = await persistence.putMovements(user, movements);
+      // Prevalidación de todo el batch; no confiar en flags opcionales de validación.
+      for (const movement of movements) await verifyMovement(user, movement);
+      const saved = await persistence.putMovements(user, movements, {
+        validate: async () => { for (const movement of movements) await verifyMovement(user, movement); },
+      });
       await audit(user, { action: "movements.put", ok: true, detail: `${saved} movimientos` });
       res.json({ ok: true, saved });
     } catch (err) {
       next(err);
     }
+  });
+
+  /** Guarda UN movimiento con adjunto. Comprueba archivo/asociación y relee la escritura. */
+  router.put("/movimientos/:movementId", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const movement = req.body?.movement;
+      if (!safeSegment(req.params.movementId) || !movement || movement.id !== req.params.movementId ||
+          typeof movement.propertyId !== "string" || !movement.propertyId) {
+        return badRequest(res, "Identificador de operación o inmueble no válido.");
+      }
+      if (!expenseReferences(movement).length) return badRequest(res, "Falta el comprobante remoto obligatorio.");
+      await verifyMovement(user, movement);
+      await persistence.putMovements(user, [movement], { expectedVersion: req.get("if-match") || undefined,
+        validate: async () => verifyMovement(user, movement) });
+      const persisted = (await persistence.getMovements(user)).find((m) => m.id === movement.id);
+      if (!persisted || JSON.stringify(persisted) !== JSON.stringify(movement)) {
+        throw new VaultStorageUnavailableError("El almacén no ha confirmado la asociación y persistencia de la operación.");
+      }
+      await verifyMovement(user, persisted);
+      await audit(user, { action: "movements.put", ok: true, target: movement.id, detail: "adjunto y operación confirmados" });
+      res.json({ ok: true, storageOk: true, movement: persisted });
+    } catch (err) { next(err); }
   });
 
   /**
@@ -345,6 +428,16 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  router.get("/entities/:id", requireAuth, async (req: Request, res, next) => {
+    try {
+      if (!isVaultEntityType(req.query.type)) return badRequest(res, "Tipo de entidad no admitido.");
+      const row = await persistence.getEntity((req as any).vaultUser, req.query.type, req.params.id);
+      if (!row) return res.status(404).json({ ok: false, error: "La entidad no existe en esta cartera." });
+      res.setHeader("etag", row.version!); res.setHeader("cache-control", "private, no-store");
+      res.json({ ok: true, entity: row });
+    } catch (err) { next(err); }
+  });
+
   router.post("/entities", requireAuth, async (req: Request, res, next) => {
     try {
       const user = (req as any).vaultUser;
@@ -357,7 +450,22 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       if (entity === null || typeof entity !== "object") {
         return badRequest(res, "Falta el contenido de la entidad (entity: objeto JSON).");
       }
-      const record = await persistence.putEntity(user, type, clean, entity);
+      const attachmentIds = req.body?.attachmentIds;
+      if (attachmentIds !== undefined && (type !== "properties" || entity.id !== clean || !Array.isArray(attachmentIds) || attachmentIds.length > 20))
+        return badRequest(res, "La asociación requiere una entidad válida.");
+      if (type === "properties") {
+        await verifyProperty(user, clean, entity);
+        // El parámetro sigue como comprobación adicional; NO selecciona qué referencias verificar.
+        const all = new Set(propertyReferences(entity).map((r) => r.vaultId).filter(Boolean));
+        if (attachmentIds?.some((fileId: any) => !all.has(fileId))) return badRequest(res, "El documento no está asociado al inmueble.");
+      }
+      const record = await persistence.putEntity(user, type, clean, entity, { expectedVersion: req.get("if-match") || undefined,
+        validate: async () => { if (type === "properties") await verifyProperty(user, clean, entity); } });
+      if (type === "properties" && propertyReferences(entity).length) {
+        const persisted = await persistence.getEntity(user, type, clean);
+        if (!persisted || JSON.stringify(persisted.data) !== JSON.stringify(entity)) throw new VaultStorageUnavailableError("No se han confirmado los documentos del inmueble.");
+        await verifyProperty(user, clean, persisted.data);
+      }
       await audit(user, { action: "entity.put", ok: true, target: `${type}:${clean}` });
       res.status(201).json({ ok: true, entity: record });
     } catch (err: any) {
@@ -373,7 +481,11 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       if (!isVaultEntityType(type)) {
         return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
       }
-      const deleted = await persistence.deleteEntity(user, type, req.params.id);
+      const deleted = await persistence.deleteEntity(user, type, req.params.id, { expectedVersion: req.get("if-match") || undefined,
+        validate: async () => {
+          if (type === "properties" && (await persistence.getMovements(user)).some((m) => m.propertyId === req.params.id && expenseReferences(m).length))
+            throw new VaultConflictError("El inmueble mantiene gastos con documentos; no se borra desde un snapshot.");
+        } });
       if (!deleted) {
         res.status(404).json({ ok: false, error: "La entidad no existe para esta cuenta." });
         return;
@@ -388,7 +500,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
   router.get("/files", requireAuth, async (req: Request, res, next) => {
     try {
       const files = await persistence.listFiles((req as any).vaultUser);
-      res.json({ ok: true, files });
+      res.json({ ok: true, files: files.map(publicFileMeta) });
     } catch (err) {
       next(err);
     }
@@ -422,7 +534,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       await audit(user, { action: "file.upload", ok: true, target: meta.id, detail: `${meta.size} bytes` });
       res.status(201).json({ ok: true, file: publicFileMeta(meta), storageOk: true });
     } catch (err: any) {
-      if (err instanceof Error && /límite|tipo no admitido|identificador|sobrescribe/i.test(err.message)) {
+      if (!(err instanceof VaultConflictError) && err instanceof Error && /límite|tipo no admitido|identificador|sobrescribe/i.test(err.message)) {
         return badRequest(res, err.message);
       }
       next(err);
@@ -439,36 +551,54 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       if (!options.presign) {
         return res.status(501).json({ ok: false, error: "La subida directa no está disponible en este despliegue." });
       }
-      const { name, contentType, size, movementId, propertyId } = req.body ?? {};
+      const { name, contentType, size, movementId, propertyId, id, sha256 } = req.body ?? {};
       const typeProblem = vaultContentTypeProblem(typeof contentType === "string" ? contentType : "");
       if (typeProblem) return badRequest(res, typeProblem);
       const sizeNum = Number(size);
-      if (!Number.isFinite(sizeNum) || sizeNum <= 0) return badRequest(res, "Tamaño de archivo no válido.");
+      if (!Number.isInteger(sizeNum) || sizeNum <= 0) return badRequest(res, "Tamaño de archivo no válido.");
       if (sizeNum > VAULT_MAX_FILE_BYTES) return res.status(413).json({ ok: false, error: "El archivo supera el límite de 10 MB." });
-
-      const fileId = vaultFileId();
-      const validUntil = Date.now() + 10 * 60 * 1000; // 10 minutos
-      const signed = await options.presign({
-        username: user,
-        fileId,
-        contentType,
-        maxBytes: Math.min(VAULT_MAX_FILE_BYTES, Math.ceil(sizeNum)),
-        validUntil,
-      });
+      if (id !== undefined && !safeSegment(id)) return badRequest(res, "Identificador de archivo no válido.");
+      if (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256))) {
+        return badRequest(res, "Resumen SHA-256 no válido.");
+      }
+      if (id === undefined && !sha256) return badRequest(res, "La subida directa legacy requiere SHA-256 antes de reservar; no se genera un ID aleatorio.");
+      const fileId = id ?? legacyFileId({ name, contentType, sha256, movementId, propertyId });
+      const existing = await persistence.getFileMeta(user, fileId);
+      if (existing) {
+        if (existing.size !== sizeNum || existing.contentType !== contentType ||
+            (existing.sha256 && existing.sha256 !== sha256) ||
+            (existing.uploadSha256 && existing.uploadSha256 !== sha256) ||
+            (typeof movementId === "string" && existing.movementId !== movementId) ||
+            (typeof propertyId === "string" && existing.propertyId !== propertyId)) {
+          return res.status(409).json({ ok: false, error: "La reserva corresponde a otro archivo o asociación; no se sobrescribe." });
+        }
+        const bytes = await persistence.readFileBytes(user, fileId);
+        if (bytes) {
+          if (bytes.length !== sizeNum || (sha256 && sha256Hex(bytes) !== sha256)) {
+            return res.status(409).json({ ok: false, error: "El objeto existente no coincide con el archivo; no se sobrescribe ni elimina." });
+          }
+          return res.json({ ok: true, fileId, ...(existing.sha256 ? { alreadyCommitted: true } : { readyToCommit: true }) });
+        }
+        if (existing.sha256) return res.status(409).json({ ok: false, error: "El objeto confirmado ya no está disponible." });
+      }
+      const validUntil = Date.now() + 10 * 60 * 1000;
+      const signed = await options.presign({ username: user, fileId, contentType,
+        maxBytes: Math.min(VAULT_MAX_FILE_BYTES, sizeNum), validUntil });
       if (!signed) return res.status(501).json({ ok: false, error: "La subida directa no está disponible en este despliegue." });
-
-      // Reserva de metadatos: mismo identificador, sin contenido todavía (se completa al confirmar).
-      await persistence.putFileMeta(user, {
-        id: fileId,
-        name: typeof name === "string" ? name.slice(0, 200) : "archivo",
-        contentType,
-        size: sizeNum,
-        sha256: "",
-        createdAt: new Date().toISOString(),
-        ...(typeof movementId === "string" ? { movementId } : {}),
-        ...(typeof propertyId === "string" ? { propertyId } : {}),
-        sha256VerifiedBy: "server",
-      });
+      if (!existing) {
+        try { await persistence.putFileMeta(user, {
+          id: fileId, name: typeof name === "string" ? name.slice(0, 200) : "archivo",
+          contentType, size: sizeNum, sha256: "", createdAt: new Date().toISOString(),
+          ...(typeof movementId === "string" ? { movementId } : {}),
+          ...(typeof propertyId === "string" ? { propertyId } : {}),
+          ...(sha256 ? { uploadSha256: sha256 } : {}), sha256VerifiedBy: "server",
+        }); } catch (err) {
+          if (!(err instanceof VaultConflictError)) throw err;
+          const concurrent = await persistence.getFileMeta(user, fileId);
+          if (!concurrent || concurrent.size !== sizeNum || concurrent.contentType !== contentType || concurrent.uploadSha256 !== sha256 ||
+              concurrent.movementId !== movementId || concurrent.propertyId !== propertyId) throw err;
+        }
+      }
       await audit(user, { action: "file.upload.direct", ok: true, target: fileId, detail: "firma emitida" });
       res.status(201).json({ ok: true, fileId, upload: signed });
     } catch (err) {
@@ -486,7 +616,6 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       const user = (req as any).vaultUser;
       const meta = await persistence.getFileMeta(user, req.params.fileId);
       if (!meta) return res.status(404).json({ ok: false, error: "La subida no está reservada para esta cuenta." });
-      if (meta.sha256) return res.json({ ok: true, file: publicFileMeta(meta), storageOk: true, alreadyCommitted: true });
 
       const bytes = await persistence.readFileBytes(user, req.params.fileId);
       if (!bytes || bytes.length === 0) {
@@ -501,18 +630,29 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       }
       const clientSha = typeof req.body?.sha256 === "string" ? req.body.sha256.toLowerCase() : "";
       const serverSha = sha256Hex(bytes);
-      if (clientSha && clientSha !== serverSha) {
-        await persistence.deleteFileBytes(user, req.params.fileId);
-        await persistence.deleteFileMeta(user, req.params.fileId);
-        return badRequest(res, "El archivo recibido no coincide con su resumen SHA-256; se ha descartado.");
+      if ((clientSha && clientSha !== serverSha) || (meta.uploadSha256 && meta.uploadSha256 !== serverSha) ||
+          (meta.sha256 && meta.sha256 !== serverSha) || bytes.length !== meta.size) {
+        return badRequest(res, "El archivo recibido no coincide con su resumen SHA-256 o tamaño. No se confirma, sobrescribe ni elimina el objeto.");
       }
+      if (meta.sha256) return res.json({ ok: true, file: publicFileMeta(meta), storageOk: true, alreadyCommitted: true });
       const committed: VaultFileMeta = { ...meta, size: bytes.length, sha256: serverSha, sha256VerifiedBy: "server" };
       await persistence.putFileMeta(user, committed);
+      const persisted = await persistence.getFileMeta(user, committed.id);
+      if (!persisted || persisted.sha256 !== serverSha) throw new VaultStorageUnavailableError("No se han confirmado los metadatos del archivo.");
       await audit(user, { action: "file.upload", ok: true, target: meta.id, detail: `${bytes.length} bytes (directa, verificada)` });
       res.json({ ok: true, file: publicFileMeta(committed), storageOk: true, sha256: serverSha });
     } catch (err) {
       next(err);
     }
+  });
+
+  router.get("/files/:fileId/verify", requireAuth, async (req: Request, res, next) => {
+    try {
+      const stored = await readVerifiedFile(persistence, (req as any).vaultUser, req.params.fileId);
+      if (!stored) return res.status(404).json({ ok: false, error: "El archivo no está confirmado o no existe para esta cuenta." });
+      res.setHeader("cache-control", "private, no-store");
+      res.json({ ok: true, storageOk: true, file: publicFileMeta(stored.meta) });
+    } catch (err) { next(err); }
   });
 
   router.get("/files/:fileId", requireAuth, async (req: Request, res, next) => {
@@ -538,6 +678,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       res.setHeader("content-length", String(bytes.length));
       res.setHeader("content-disposition", `attachment; filename="${encodeURIComponent(meta.name).replace(/["\\]/g, "")}"`);
       res.setHeader("x-vault-sha256", meta.sha256);
+      res.setHeader("cache-control", "private, no-store");
       await audit(user, { action: "file.download", ok: true, target: meta.id });
       res.status(200).end(Buffer.from(bytes));
     } catch (err) {
@@ -548,17 +689,18 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
   router.delete("/files/:fileId", requireAuth, async (req: Request, res, next) => {
     try {
       const user = (req as any).vaultUser;
+      // Compatibilidad legacy: las referencias anteriores al pin también se conservan.
+      const movements = await persistence.getMovements(user);
+      const properties = await persistence.listEntities(user, "properties");
+      if (movements.some((m) => expenseReferences(m).some((r) => r.vaultId === req.params.fileId)) ||
+          properties.some((p) => propertyReferences(p.data).some((r) => r.vaultId === req.params.fileId)))
+        throw new VaultConflictError("El documento mantiene una asociación confirmada; no se retira.");
       const deleted = await persistence.deleteFileMeta(user, req.params.fileId);
-      if (!deleted) {
-        res.status(404).json({ ok: false, error: "El archivo no existe para esta cuenta." });
-        return;
-      }
-      await persistence.deleteFileBytes(user, req.params.fileId).catch(() => undefined);
-      await audit(user, { action: "file.delete", ok: true, target: req.params.fileId });
+      if (!deleted) return res.status(404).json({ ok: false, error: "El archivo no existe para esta cuenta." });
+      // Retirada lógica: el CAS protege contra un enlace concurrente. No borrar bytes.
+      await audit(user, { action: "file.delete", ok: true, target: req.params.fileId, detail: "retirada lógica, bytes conservados" });
       res.status(204).end();
-    } catch (err) {
-      next(err);
-    }
+    } catch (err) { next(err); }
   });
 
   // ---------- expediente fiscal ----------
@@ -590,17 +732,14 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       const from = typeof req.query.from === "string" ? req.query.from : "";
       const to = typeof req.query.to === "string" ? req.query.to : "";
       const filtered = filterByRange(await persistence.getMovements(user), from, to);
+      for (const movement of filtered) await verifyMovement(user, movement);
       const allFiles = await persistence.listFiles(user);
       const hasRange = Boolean(from || to);
       let included = allFiles;
       if (hasRange) {
         const movementIds = new Set(filtered.map((m: any) => m?.id).filter(Boolean));
-        const referenced = new Set<string>();
-        for (const m of filtered) {
-          for (const v of Object.values(m ?? {})) {
-            if (typeof v === "string" && /^file_[A-Za-z0-9_-]+$/.test(v)) referenced.add(v);
-          }
-        }
+        // Referencias reales, no una expresión regular ligada al prefijo histórico file_.
+        const referenced = new Set(filtered.flatMap((m: any) => expenseReferences(m).flatMap((r) => r.vaultId ? [r.vaultId] : [])));
         included = allFiles.filter((f) => (f.movementId && movementIds.has(f.movementId)) || referenced.has(f.id));
       }
 
@@ -615,8 +754,22 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       ];
       const usedNames = new Set<string>();
       for (const meta of included) {
-        const got = await persistence.readFileBytes(user, meta.id);
-        if (!got) continue;
+        const verified = await readVerifiedFile(persistence, user, meta.id);
+        if (!verified) throw new VaultAttachmentPolicyError("attachment/unconfirmed", "El expediente contiene una reserva o documento no confirmado.");
+        if (verified.meta.propertyId) {
+          const parent = await persistence.getEntity(user, "properties", verified.meta.propertyId);
+          if (!parent) throw new VaultAttachmentPolicyError("attachment/parent-not-found", "El documento del expediente no tiene inmueble autorizado.");
+          if (!verified.meta.movementId && !propertyReferences(parent.data).some((r) => r.vaultId === meta.id))
+            throw new VaultAttachmentPolicyError("attachment/association-conflict", "El documento no figura en las asociaciones confirmadas de su inmueble.");
+        }
+        if (!verified.meta.movementId && !verified.meta.propertyId)
+          throw new VaultAttachmentPolicyError("attachment/association-conflict", "El objeto carece de contexto patrimonial confirmado; no se exporta como documento asociado.");
+        if (verified.meta.movementId) {
+          const related = await persistence.getMovement(user, verified.meta.movementId);
+          if (!related || !expenseReferences(related.data).some((r) => r.vaultId === meta.id) || (meta.propertyId && related.data.propertyId !== meta.propertyId))
+            throw new VaultAttachmentPolicyError("attachment/association-conflict", "El documento no corresponde al gasto del expediente.");
+        }
+        const got = verified.bytes;
         const clean = (meta.name || "archivo").replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 80);
         let entryName = `archivos/${meta.id}_${clean}`;
         let n = 1;
@@ -686,13 +839,35 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  router.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    if (err instanceof VaultConflictError) return res.status(409).json({ ok: false, code: err.code, error: err.message });
+    if (err instanceof VaultAttachmentPolicyError) return res.status(err.status).json({ ok: false, code: err.code, error: err.message });
+    next(err);
+  });
   return router;
 }
 
 /** Metadatos que SÍ pueden salir al cliente (nunca la ruta interna del objeto). */
-export function publicFileMeta(meta: VaultFileMeta): Omit<VaultFileMeta, "blobPathname"> {
-  const { blobPathname: _omit, ...rest } = meta;
+export function publicFileMeta(meta: VaultFileMeta): Omit<VaultFileMeta, "blobPathname" | "uploadSha256"> {
+  const { blobPathname: _omit, uploadSha256: _reservation, attachmentProtected: _pin, deletedAt: _retired, ...rest } = meta;
   return rest;
+}
+
+async function readVerifiedFile(persistence: VaultPersistence, user: string, id: string): Promise<{ meta: VaultFileMeta; bytes: Uint8Array } | null> {
+  const meta = await persistence.getFileMeta(user, id);
+  if (!meta || !meta.sha256) return null;
+  const bytes = await persistence.readFileBytes(user, id);
+  if (!bytes) return null;
+  if (bytes.length !== meta.size || sha256Hex(bytes) !== meta.sha256) {
+    throw new VaultStorageUnavailableError("El archivo almacenado no supera la verificación de integridad.");
+  }
+  return { meta, bytes };
+}
+
+function legacyFileId(opts: { name?: unknown; contentType?: unknown; sha256?: unknown; movementId?: unknown; propertyId?: unknown }): string {
+  return `file_${sha256Hex(new TextEncoder().encode(JSON.stringify([
+    opts.name ?? "archivo", opts.contentType ?? "", opts.movementId ?? "", opts.propertyId ?? "", opts.sha256,
+  ])))}`;
 }
 
 /**
@@ -715,18 +890,32 @@ export async function storeNewFile(
   const typeProblem = vaultContentTypeProblem(opts.contentType);
   if (typeProblem) throw new Error(typeProblem);
 
-  const id = opts.id ? safeSegment(opts.id) : vaultFileId();
+  const id = opts.id ? safeSegment(opts.id) : legacyFileId({ ...opts, sha256: sha256Hex(opts.bytes) });
   if (!id) throw new Error("Identificador de archivo no válido.");
   const sha = sha256Hex(opts.bytes);
 
   const existing = await persistence.getFileMeta(opts.username, id);
-  if (existing) {
-    // Idempotencia: reintentar la misma subida reutiliza el objeto ya verificado.
-    if (existing.sha256 === sha && existing.size === opts.bytes.length) return existing;
-    throw new Error("Ya existe un archivo distinto con ese identificador; no se sobrescribe.");
+  if (existing && (existing.size !== opts.bytes.length || existing.contentType !== opts.contentType ||
+      (existing.sha256 && existing.sha256 !== sha) || (existing.uploadSha256 && existing.uploadSha256 !== sha) ||
+      (opts.movementId !== undefined && existing.movementId !== opts.movementId) ||
+      (opts.propertyId !== undefined && existing.propertyId !== opts.propertyId))) {
+    throw new Error("Ya existe un archivo distinto o asociado a otra operación/inmueble; no se sobrescribe.");
   }
-
-  await persistence.writeFileBytes(opts.username, id, opts.bytes, opts.contentType);
+  const storedBytes = await persistence.readFileBytes(opts.username, id);
+  if (storedBytes) {
+    if (storedBytes.length !== opts.bytes.length || sha256Hex(storedBytes) !== sha) {
+      throw new Error("Ya existe un archivo distinto con ese identificador; no se sobrescribe.");
+    }
+    if (existing?.sha256) return existing;
+  } else {
+    if (existing?.sha256) throw new VaultStorageUnavailableError("El documento confirmado ya no está en el almacén. No se sustituye automáticamente.");
+    try { await persistence.writeFileBytes(opts.username, id, opts.bytes, opts.contentType, true); }
+    catch (err) {
+      if (!(err instanceof VaultConflictError) && (err as any)?.code !== "EEXIST") throw err;
+      const concurrent = await persistence.readFileBytes(opts.username, id);
+      if (!concurrent || sha256Hex(concurrent) !== sha) throw err;
+    }
+  }
   const readBack = await persistence.readFileBytes(opts.username, id);
   if (!readBack || sha256Hex(readBack) !== sha) {
     throw new VaultStorageUnavailableError(
@@ -743,8 +932,21 @@ export async function storeNewFile(
     createdAt: new Date().toISOString(),
     sha256VerifiedBy: "server",
   };
-  if (opts.movementId) meta.movementId = String(opts.movementId).slice(0, 128);
-  if (opts.propertyId) meta.propertyId = String(opts.propertyId).slice(0, 128);
-  await persistence.putFileMeta(opts.username, meta);
-  return meta;
+  // Cliente histórico puede omitir la asociación al reintentar: omitir no significa borrarla.
+  const movementId = opts.movementId ?? existing?.movementId;
+  const propertyId = opts.propertyId ?? existing?.propertyId;
+  if (movementId) meta.movementId = String(movementId).slice(0, 128);
+  if (propertyId) meta.propertyId = String(propertyId).slice(0, 128);
+  try { await persistence.putFileMeta(opts.username, meta); }
+  catch (err) {
+    if (!(err instanceof VaultConflictError)) throw err;
+    const concurrent = await persistence.getFileMeta(opts.username, id);
+    if (!concurrent || concurrent.sha256 !== sha || concurrent.size !== meta.size || concurrent.contentType !== meta.contentType ||
+        concurrent.movementId !== meta.movementId || concurrent.propertyId !== meta.propertyId) throw err;
+  }
+  const persisted = await persistence.getFileMeta(opts.username, id);
+  if (!persisted || persisted.sha256 !== sha || persisted.size !== opts.bytes.length) {
+    throw new VaultStorageUnavailableError("Los metadatos del archivo no se han confirmado en el almacén.");
+  }
+  return persisted;
 }
