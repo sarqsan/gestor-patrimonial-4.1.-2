@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense, TenantContractRecord, getEffectivePropertyFinancials } from "../types";
-import { validateAttachment, newAttachmentId } from "../lib/attachmentRules";
+import { validateAttachment, newAttachmentId, contractPdfSource, hasAttachmentSource } from "../lib/attachmentRules";
 import { uploadAttachment, uploadBytesVerified, downloadAttachment } from "../lib/attachments";
 import { externalizeImportedProperties } from "../lib/importAttachments";
 import {
@@ -2364,11 +2364,14 @@ export default function Properties({
                                       href="#"
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        if (!prop.contract?.pdfPath) {
-                                          alert("Este contrato no tiene archivo guardado en Storage (registro anterior o generado sin archivo). Vuelve a adjuntar el PDF.");
+                                        // El contrato puede estar en el almacenamiento remoto (pdfVaultId),
+                                        // en Storage (pdfPath) o no tener archivo (registro anterior/generado).
+                                        const contractSource = contractPdfSource(prop.contract ?? {});
+                                        if (!hasAttachmentSource(contractSource)) {
+                                          alert("Este contrato no tiene archivo guardado (registro anterior o generado sin archivo). Vuelve a adjuntar el PDF.");
                                           return;
                                         }
-                                        downloadAttachment({ vaultId: prop.contract.pdfVaultId, storagePath: prop.contract.pdfPath, fileName: prop.contract.pdfName || "contrato.pdf" })
+                                        downloadAttachment({ vaultId: contractSource.vaultId, storagePath: contractSource.storagePath, fileName: prop.contract?.pdfName || "contrato.pdf" })
                                           .catch((err) => alert(err instanceof Error ? err.message : "No se pudo descargar el contrato."));
                                       }}
                                       className="text-[10px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded font-bold transition-all cursor-pointer"

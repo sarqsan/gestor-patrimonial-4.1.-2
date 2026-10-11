@@ -145,6 +145,56 @@ export function hasReceipt(exp: { receiptUrl?: string; receiptPath?: string; rec
   return !!(exp.receiptPath || exp.receiptVaultId || exp.receiptUrl);
 }
 
+/**
+ * Referencia resuelta de un adjunto. Un único origen por adjunto, con la MISMA prioridad
+ * de lectura en toda la interfaz (descarga, visor y exportación): vault → Storage → legado.
+ */
+export interface AttachmentSource {
+  /** Almacenamiento remoto propio (destino definitivo actual). */
+  vaultId?: string;
+  /** Firebase Storage (si el proyecto vuelve a autorizar la sesión). */
+  storagePath?: string;
+  /** Archivo histórico o cola local: data URL incrustada. */
+  inlineData?: string;
+}
+
+/** Resuelve el origen de lectura del comprobante de un movimiento (prioridad vault → Storage → legado). */
+export function receiptSource(exp: {
+  receiptVaultId?: string;
+  receiptPath?: string;
+  receiptUrl?: string;
+}): AttachmentSource {
+  if (exp.receiptVaultId) return { vaultId: exp.receiptVaultId };
+  if (exp.receiptPath) return { storagePath: exp.receiptPath };
+  // Solo un data URL real es legible como archivo incrustado; una ruta suelta no se finge como archivo.
+  if (isInlineDataUrl(exp.receiptUrl)) return { inlineData: exp.receiptUrl };
+  return {};
+}
+
+/** Resuelve el origen de lectura de un documento de inmueble (prioridad vault → Storage → legado). */
+export function documentSource(doc: {
+  vaultId?: string;
+  storagePath?: string;
+  fileData?: string;
+}): AttachmentSource {
+  if (doc.vaultId) return { vaultId: doc.vaultId };
+  if (doc.storagePath) return { storagePath: doc.storagePath };
+  if (isInlineDataUrl(doc.fileData)) return { inlineData: doc.fileData };
+  return {};
+}
+
+/** Resuelve el origen de lectura del PDF de un contrato (prioridad vault → Storage). */
+export function contractPdfSource(contract: { pdfVaultId?: string; pdfPath?: string }): AttachmentSource {
+  if (contract.pdfVaultId) return { vaultId: contract.pdfVaultId };
+  if (contract.pdfPath) return { storagePath: contract.pdfPath };
+  return {};
+}
+
+/** ¿Hay algún origen real desde el que recuperar el adjunto? (evita prometer descargas inexistentes). */
+export function hasAttachmentSource(source: AttachmentSource): boolean {
+  return !!(source.vaultId || source.storagePath || source.inlineData);
+}
+
 /** Lista los adjuntos históricos incrustados en la cartera (solo lectura, sin escribir nada). */
 export function listLegacyInlineAttachments(portfolio: {
   properties?: Array<{ id: string; documents?: Array<{ id: string; fileData?: string }>; contract?: { pdfName?: string } }>;

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Property, PropertyExpense } from "../types";
-import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId } from "../lib/attachmentRules";
+import { hasReceipt, validateAttachment, resolveContentType, newAttachmentId, receiptSource, AttachmentSource, hasAttachmentSource } from "../lib/attachmentRules";
 import { uploadAttachment, uploadBytesVerified, getAttachmentPreviewUrl, getAttachmentBlob, downloadAttachment, expenseReceiptFieldsFromStored } from "../lib/attachments";
 import { externalizeImportedExpenses } from "../lib/importAttachments";
 import { extractYearFromDate, normalizeDateToIso, isDateOlderThanYears } from "../lib/dateUtils";
@@ -67,12 +67,29 @@ interface ExpensesProps {
   currentYear?: number;
 }
 
-function isImageAttachment(exp: { receiptType?: string; receiptName?: string; receiptPath?: string }, src: string): boolean {
-  return (exp.receiptType || "").startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptName || "") || src.startsWith("data:image/") || (!!exp.receiptPath && /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptPath));
+function isImageAttachment(
+  exp: { receiptType?: string; receiptName?: string; receiptPath?: string },
+  src?: string
+): boolean {
+  return (exp.receiptType || "").startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptName || "") || (src || "").startsWith("data:image/") || (!!exp.receiptPath && /\.(png|jpe?g|webp|gif)$/i.test(exp.receiptPath));
 }
 
-function isPdfAttachment(exp: { receiptType?: string; receiptName?: string; receiptPath?: string }, src: string): boolean {
-  return (exp.receiptType || "") === "application/pdf" || /\.pdf$/i.test(exp.receiptName || "") || src.startsWith("data:application/pdf");
+function isPdfAttachment(
+  exp: { receiptType?: string; receiptName?: string; receiptPath?: string },
+  src?: string
+): boolean {
+  return (exp.receiptType || "") === "application/pdf" || /\.pdf$/i.test(exp.receiptName || "") || (src || "").startsWith("data:application/pdf");
+}
+
+/**
+ * Marca de comprobante existente en el formulario cuando solo hay una referencia remota
+ * (vault/Storage) y todavía no se ha resuelto una URL local para previsualizarlo.
+ */
+const REMOTE_RECEIPT_PLACEHOLDER = "vault:referencia-remota";
+
+/** ¿La URL disponible se puede pintar directamente en un <img>? */
+function isPreviewableImageUrl(url?: string): boolean {
+  return !!url && (url.startsWith("data:image/") || url.startsWith("blob:"));
 }
 
 export default function Expenses({
@@ -122,6 +139,8 @@ export default function Expenses({
   const [receiptUrl, setReceiptUrl] = useState<string | undefined>(undefined);
   const [receiptName, setReceiptName] = useState<string | undefined>(undefined);
   const [receiptType, setReceiptType] = useState<string | undefined>(undefined);
+  // Origen remoto del comprobante ya guardado (vault/Storage) al editar un movimiento.
+  const [existingReceiptRef, setExistingReceiptRef] = useState<AttachmentSource>({});
   const [error, setError] = useState<string | null>(null);
   const [amortNotification, setAmortNotification] = useState<{ text: string; isError: boolean } | null>(null);
 
@@ -519,6 +538,7 @@ export default function Expenses({
     setReceiptUrl(undefined);
     setReceiptName(undefined);
     setReceiptType(undefined);
+    setExistingReceiptRef({});
     setReceiptError(null);
     setError(null);
   };
@@ -540,8 +560,22 @@ export default function Expenses({
     setAmount(exp.amount.toString());
     setDate(exp.date);
     setDescription(exp.description || "");
-    if (exp.receiptPath) setReceiptUrl(exp.receiptPath);
+    // El comprobante existente se reconoce con la MISMA prioridad de lectura que la descarga
+    // (vault → Storage → legado): editar un movimiento con comprobante en el almacenamiento
+    // remoto no debe mostrar el formulario como si no tuviera ninguno.
+    const source = receiptSource(exp);
+    setExistingReceiptRef(source);
+    if (source.inlineData) setReceiptUrl(source.inlineData);
+    else if (source.storagePath) setReceiptUrl(source.storagePath);
+    else if (source.vaultId) {
+      setReceiptUrl(REMOTE_RECEIPT_PLACEHOLDER);
+      // Previsualización local bajo demanda; si falla, se conserva la marca de comprobante existente.
+      getAttachmentBlob({ vaultId: source.vaultId })
+        .then((blob) => setReceiptUrl(URL.createObjectURL(blob)))
+        .catch(() => undefined);
+    }
     if (exp.receiptName) setReceiptName(exp.receiptName);
+    if (exp.receiptType) setReceiptType(exp.receiptType);
     setIsAdding(true);
   };
 
@@ -1018,7 +1052,7 @@ export default function Expenses({
               ) : (
                 <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 flex items-center justify-between gap-3">
                   <div className="flex items-center space-x-3 overflow-hidden min-w-0">
-                    {receiptType?.startsWith("image/") || receiptUrl.startsWith("data:image/") ? (
+                    {receiptType?.startsWith("image/") && isPreviewableImageUrl(receiptUrl) ? (
                       <div className="w-12 h-12 rounded-lg bg-slate-800 border border-slate-700 overflow-hidden shrink-0 flex items-center justify-center relative">
                         <img src={receiptUrl} alt="Vista previa" className="w-full h-full object-cover" />
                       </div>
@@ -1030,7 +1064,14 @@ export default function Expenses({
                     <div className="min-w-0">
                       <p className="text-xs font-bold text-white truncate">{receiptName || "Comprobante_adjunto"}</p>
                       <p className="text-[10px] font-mono text-emerald-400 flex items-center gap-1 mt-0.5">
-                        <Check className="w-3 h-3" /> Archivo preparado para guardar
+                        <Check className="w-3 h-3" />
+                        {pendingReceiptFile
+                          ? "Archivo preparado para guardar"
+                          : existingReceiptRef.vaultId
+                            ? "Guardado en el almacenamiento remoto"
+                            : existingReceiptRef.storagePath
+                              ? "Guardado en Storage"
+                              : "Comprobante guardado"}
                       </p>
                     </div>
                   </div>
@@ -1046,7 +1087,10 @@ export default function Expenses({
                           amount: parseFloat(amount) || 0,
                           date: date || new Date().toISOString().split('T')[0],
                           description: description || 'Vista previa del comprobante',
-                          receiptUrl,
+                          // El visor resuelve la referencia real del comprobante: vault → Storage → legado.
+                          receiptUrl: pendingReceiptFile ? receiptUrl : existingReceiptRef.inlineData,
+                          receiptPath: pendingReceiptFile ? undefined : existingReceiptRef.storagePath,
+                          receiptVaultId: pendingReceiptFile ? undefined : existingReceiptRef.vaultId,
                           receiptName,
                           receiptType
                         });
@@ -1976,7 +2020,9 @@ export default function Expenses({
                   Cerrar
                 </button>
 
-                {hasReceipt(selectedReceiptExpense) && (selectedReceiptExpense.receiptPath ? (
+                {hasReceipt(selectedReceiptExpense) && (
+                  // Un único botón para todos los orígenes (vault, Storage o legado): la descarga
+                  // resuelve la referencia real del movimiento en lugar de exigir receiptPath.
                   <button
                     type="button"
                     onClick={() => handleDownloadReceipt(selectedReceiptExpense)}
@@ -1985,21 +2031,7 @@ export default function Expenses({
                     <Download className="w-4 h-4" />
                     <span>Descargar para AEAT / Hacienda</span>
                   </button>
-                ) : (
-                  <a
-                    href={selectedReceiptExpense.receiptUrl}
-                    download={
-                      selectedReceiptExpense.receiptName ||
-                      `factura_${selectedReceiptExpense.date}_${selectedReceiptExpense.amount}eur.${
-                        selectedReceiptExpense.receiptType?.includes('pdf') ? 'pdf' : 'png'
-                      }`
-                    }
-                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-xs transition-all cursor-pointer flex items-center gap-2 shadow-lg shadow-indigo-600/20"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Descargar para AEAT / Hacienda</span>
-                  </a>
-                ))}
+                )}
               </div>
             </div>
 
