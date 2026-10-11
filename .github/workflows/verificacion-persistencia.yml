@@ -1,36 +1,51 @@
 # Verificación de persistencia contra un despliegue REAL (producción o previsualización).
 #
-# Se ejecuta SOLO bajo demanda (workflow_dispatch) y usa únicamente datos sintéticos,
-# sin secretos: el runner de GitHub sí puede alcanzar vercel.app (el entorno de desarrollo
-# de Arena no), de modo que esta es la vía autorizada para obtener evidencia real del
-# despliegue: enrutado, almacén Blob, SHA-256, persistencia tras reinicios y aislamiento.
+# Datos sintéticos, sin secretos. El runner de GitHub sí puede alcanzar vercel.app (el entorno
+# de desarrollo de Arena no), de modo que esta es la vía autorizada para obtener evidencia real
+# del despliegue: enrutado, almacén Blob, SHA-256, persistencia tras reinicios y aislamiento.
 #
-# Uso:  gh workflow run verificacion-persistencia.yml -f target_url=https://…
+# Se dispara con cada push a la rama de trabajo y bajo demanda (workflow_dispatch).
 name: Verificación de persistencia (despliegue real)
 
 on:
   workflow_dispatch:
-    inputs:
-      target_url:
-        description: "URL base del despliegue a verificar (producción o previsualización)"
-        required: true
-        default: "https://gestor-patrimonial-4-1-2.vercel.app"
+  push:
+    branches:
+      - arena/e65d6133-gestor-patrimonial-4-1-2
+    paths:
+      - "scripts/verificacion-persistencia.mjs"
+      - ".github/workflows/verificacion-persistencia.yml"
+      - "server/**"
+      - "api/**"
+      - "src/lib/vaultClient.ts"
+      - "vercel.json"
+      - "package.json"
 
 jobs:
   verificar:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nombre: produccion
+            target_url: "https://gestor-patrimonial-4-1-2.vercel.app"
+          - nombre: preview
+            target_url: "https://gestor-patrimonial-4-1-2-git-are-a5aac8-sarqsan2-4111s-projects.vercel.app"
+    name: verificar (${{ matrix.nombre }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - name: Verificación sintética end-to-end
-        run: node scripts/verificacion-persistencia.mjs "${{ inputs.target_url }}"
+        run: node scripts/verificacion-persistencia.mjs "${{ matrix.target_url }}"
       - name: Registrar resumen
         if: always()
         run: |
           {
-            echo "## Verificación de persistencia — ${{ inputs.target_url }}"
-            echo "Resultado del paso de verificación: ${{ job.status }}"
+            echo "## Verificación de persistencia — ${{ matrix.nombre }}"
+            echo "Objetivo: ${{ matrix.target_url }}"
+            echo "Resultado: ${{ job.status }}"
           } >> "$GITHUB_STEP_SUMMARY"
