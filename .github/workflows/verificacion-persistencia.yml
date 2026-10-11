@@ -14,11 +14,13 @@ on:
     branches:
       - arena/e65d6133-gestor-patrimonial-4-1-2
     paths:
-      - "scripts/verificacion-persistencia.mjs"
+      - "scripts/**"
       - ".github/workflows/verificacion-persistencia.yml"
       - "server/**"
       - "api/**"
       - "src/lib/vaultClient.ts"
+      - "src/lib/portfolioRemote.ts"
+      - "docs/**"
       - "vercel.json"
       - "package.json"
 
