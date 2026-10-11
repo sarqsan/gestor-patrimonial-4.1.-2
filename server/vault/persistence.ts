@@ -19,14 +19,19 @@ import type {
   BlobPort,
   PresignedPut,
   VaultAuditEvent,
+  VaultEntityRecord,
+  VaultEntityType,
   VaultFileMeta,
   VaultPersistence,
   VaultUserRecord,
 } from "./persistenceTypes.js";
+import { isVaultEntityType } from "./persistenceTypes.js";
 import { VercelBlobPort, blobStoreConfigured } from "./blobPort.js";
 
 export const VAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const VAULT_MAX_BACKUP_BYTES = 50 * 1024 * 1024;
+/** Límite de una entidad estructurada serializada (JSON). */
+export const VAULT_MAX_ENTITY_BYTES = 1024 * 1024;
 
 /** Error de destino no disponible: la operación NO se ha completado. */
 export class VaultStorageUnavailableError extends Error {
@@ -86,13 +91,32 @@ export class BlobVaultPersistence implements VaultPersistence {
   private auditPath(user: string, id: string): string {
     return path.posix.join(this.user(user), "audit", `${id}.json`);
   }
+  private entityPath(user: string, type: string, id: string): string {
+    return path.posix.join(this.user(user), "entities", type, `${id}.json`);
+  }
   /** Ruta pública del contenido binario (la usa el servidor para subidas directas). */
   contentPath(user: string, id: string): string {
     return path.posix.join(this.user(user), "contents", id);
   }
 
+  /**
+   * Traduce cualquier fallo del almacén a `VaultStorageUnavailableError`: la operación NO se ha
+   * confirmado y el error que recibe la aplicación es explícito (nunca un 500 genérico ni un
+   * éxito falso).
+   */
+  private async storage<T>(op: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof VaultStorageUnavailableError) throw err;
+      throw new VaultStorageUnavailableError(
+        `El almacenamiento remoto no ha confirmado la operación (${op}): ${String((err as any)?.message || err)}. No se ha guardado nada.`
+      );
+    }
+  }
+
   private async readJson<T>(pathname: string): Promise<T | null> {
-    const got = await this.port.getBytes(pathname);
+    const got = await this.storage("lectura", () => this.port.getBytes(pathname));
     if (!got) return null;
     try {
       return JSON.parse(new TextDecoder().decode(got.bytes)) as T;
@@ -103,22 +127,22 @@ export class BlobVaultPersistence implements VaultPersistence {
 
   private async writeJson(pathname: string, value: unknown): Promise<void> {
     const bytes = new TextEncoder().encode(JSON.stringify(value));
-    await this.port.putBytes(pathname, bytes, "application/json");
+    await this.storage("escritura", () => this.port.putBytes(pathname, bytes, "application/json"));
   }
 
   /** Lista por prefijo y devuelve los pathnames ordenados (paginado en el puerto). */
   private async listPathnames(prefix: string): Promise<BlobObjectInfo[]> {
-    return this.port.list(prefix);
+    return this.storage("listado", () => this.port.list(prefix));
   }
 
   async ensureSecret(): Promise<string> {
-    const got = await this.port.getBytes(this.secretPath()).catch(() => null);
+    const got = await this.storage("lectura", () => this.port.getBytes(this.secretPath())).catch(() => null);
     if (got) {
       const value = new TextDecoder().decode(got.bytes).trim();
       if (value) return value;
     }
     const secret = randomBytes(32).toString("hex");
-    await this.port.putBytes(this.secretPath(), new TextEncoder().encode(secret), "text/plain");
+    await this.storage("escritura", () => this.port.putBytes(this.secretPath(), new TextEncoder().encode(secret), "text/plain"));
     return secret;
   }
 
@@ -158,6 +182,42 @@ export class BlobVaultPersistence implements VaultPersistence {
     return map.size;
   }
 
+  async listEntities(username: string, type: VaultEntityType): Promise<VaultEntityRecord[]> {
+    if (!isVaultEntityType(type)) return [];
+    const infos = await this.listPathnames(`${this.user(username)}/entities/${type}/`);
+    const out: VaultEntityRecord[] = [];
+    for (const info of infos) {
+      if (!info.pathname.endsWith(".json")) continue;
+      const json = await this.readJson<VaultEntityRecord>(info.pathname);
+      if (json && typeof json.id === "string") out.push(json);
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  async putEntity(username: string, type: VaultEntityType, id: string, data: unknown): Promise<VaultEntityRecord> {
+    if (!isVaultEntityType(type)) throw new Error("Tipo de entidad no admitido por el almacenamiento remoto.");
+    const clean = safeSegment(id);
+    if (!clean) throw new Error("Identificador de entidad no válido.");
+    const record: VaultEntityRecord = { id: clean, updatedAt: new Date().toISOString(), data };
+    const json = JSON.stringify(record);
+    if (json.length > VAULT_MAX_ENTITY_BYTES) {
+      throw new Error("La entidad supera el límite de 1 MB del almacenamiento remoto; divide o limpia sus datos.");
+    }
+    await this.writeJson(this.entityPath(username, type, clean), record);
+    return record;
+  }
+
+  async deleteEntity(username: string, type: VaultEntityType, id: string): Promise<boolean> {
+    if (!isVaultEntityType(type)) return false;
+    const clean = safeSegment(id);
+    if (!clean) return false;
+    const pathname = this.entityPath(username, type, clean);
+    const existing = await this.readJson<VaultEntityRecord>(pathname);
+    if (!existing) return false;
+    await this.storage("borrado", () => this.port.del(pathname));
+    return true;
+  }
+
   async listFiles(username: string): Promise<VaultFileMeta[]> {
     const infos = await this.listPathnames(`${this.user(username)}/files/`);
     const out: VaultFileMeta[] = [];
@@ -185,7 +245,7 @@ export class BlobVaultPersistence implements VaultPersistence {
     if (!id) return false;
     const existing = await this.getFileMeta(username, id);
     if (!existing) return false;
-    await this.port.del(this.fileMetaPath(username, id));
+    await this.storage("borrado", () => this.port.del(this.fileMetaPath(username, id)));
     return true;
   }
 
@@ -195,21 +255,21 @@ export class BlobVaultPersistence implements VaultPersistence {
     // El pathname del contenido es determinista: se puede leer antes de que existan metadatos
     // (necesario para verificar el objeto recién subido, antes de consolidarlo).
     const meta = await this.getFileMeta(username, id);
-    const got = await this.port.getBytes(meta?.blobPathname || this.contentPath(username, id));
+    const got = await this.storage("lectura", () => this.port.getBytes(meta?.blobPathname || this.contentPath(username, id)));
     return got ? got.bytes : null;
   }
 
   async writeFileBytes(username: string, fileId: string, bytes: Uint8Array, contentType: string): Promise<void> {
     const id = safeSegment(fileId);
     if (!id) throw new Error("Identificador de archivo no válido.");
-    await this.port.putBytes(this.contentPath(username, id), bytes, contentType);
+    await this.storage("escritura", () => this.port.putBytes(this.contentPath(username, id), bytes, contentType));
   }
 
   async deleteFileBytes(username: string, fileId: string): Promise<void> {
     const id = safeSegment(fileId);
     if (!id) return;
     const meta = await this.getFileMeta(username, id);
-    await this.port.del(meta?.blobPathname || this.contentPath(username, id));
+    await this.storage("borrado", () => this.port.del(meta?.blobPathname || this.contentPath(username, id)));
   }
 
   async createBackup(
@@ -219,7 +279,7 @@ export class BlobVaultPersistence implements VaultPersistence {
   ): Promise<{ id: string; createdAt: string; size: number }> {
     const bytes = new TextEncoder().encode(JSON.stringify(portfolio));
     if (bytes.length > VAULT_MAX_BACKUP_BYTES) throw new Error("La copia supera el límite de 50 MB.");
-    await this.port.putBytes(this.backupPath(username, id), bytes, "application/json");
+    await this.storage("escritura", () => this.port.putBytes(this.backupPath(username, id), bytes, "application/json"));
     return { id, createdAt: new Date().toISOString(), size: bytes.length };
   }
 
@@ -368,6 +428,46 @@ export class FsVaultPersistence implements VaultPersistence {
     }
     await atomicWriteJson(file, current);
     return Object.keys(current).length;
+  }
+
+  private entitiesFile(username: string, type: VaultEntityType): string {
+    return path.join(this.userDir(username), `entities_${type}.json`);
+  }
+
+  async listEntities(username: string, type: VaultEntityType): Promise<VaultEntityRecord[]> {
+    if (!isVaultEntityType(type)) return [];
+    const map = await readJsonFile<Record<string, VaultEntityRecord>>(this.entitiesFile(username, type), {});
+    return Object.values(map)
+      .filter((e) => e && typeof e.id === "string")
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  async putEntity(username: string, type: VaultEntityType, id: string, data: unknown): Promise<VaultEntityRecord> {
+    if (!isVaultEntityType(type)) throw new Error("Tipo de entidad no admitido por el almacenamiento remoto.");
+    const clean = safeSegment(id);
+    if (!clean) throw new Error("Identificador de entidad no válido.");
+    const record: VaultEntityRecord = { id: clean, updatedAt: new Date().toISOString(), data };
+    const json = JSON.stringify(record);
+    if (json.length > VAULT_MAX_ENTITY_BYTES) {
+      throw new Error("La entidad supera el límite de 1 MB del almacenamiento remoto; divide o limpia sus datos.");
+    }
+    const file = this.entitiesFile(username, type);
+    const current = await readJsonFile<Record<string, VaultEntityRecord>>(file, {});
+    current[clean] = record;
+    await atomicWriteJson(file, current);
+    return record;
+  }
+
+  async deleteEntity(username: string, type: VaultEntityType, id: string): Promise<boolean> {
+    if (!isVaultEntityType(type)) return false;
+    const clean = safeSegment(id);
+    if (!clean) return false;
+    const file = this.entitiesFile(username, type);
+    const current = await readJsonFile<Record<string, VaultEntityRecord>>(file, {});
+    if (!(clean in current)) return false;
+    delete current[clean];
+    await atomicWriteJson(file, current);
+    return true;
   }
 
   async listFiles(username: string): Promise<VaultFileMeta[]> {
@@ -526,6 +626,15 @@ export class UnconfiguredVaultPersistence implements VaultPersistence {
     return [];
   }
   async putMovements(_username: string, _movements: Record<string, any>[]): Promise<number> {
+    return this.fail();
+  }
+  async listEntities(_username: string, _type: VaultEntityType): Promise<VaultEntityRecord[]> {
+    return [];
+  }
+  async putEntity(_username: string, _type: VaultEntityType, _id: string, _data: unknown): Promise<VaultEntityRecord> {
+    return this.fail();
+  }
+  async deleteEntity(_username: string, _type: VaultEntityType, _id: string): Promise<boolean> {
     return this.fail();
   }
   async listFiles(_username: string): Promise<VaultFileMeta[]> {

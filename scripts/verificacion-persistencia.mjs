@@ -192,6 +192,51 @@ check("V5c. copia de seguridad creada", putBk.status === 201, `status=${putBk.st
 const getBk = await req("GET", urlWithId("backups.get", `/api/vault/backups/${backupId}`, backupId), { token: accA.token });
 check("V5d. copia de seguridad recuperada íntegra", getBk.status === 200 && getBk.json?.portfolio?.marca === "verificacion", `status=${getBk.status}`);
 
+// --- V10: entidades patrimoniales con relaciones --------------------------------
+const propId = `prop_verif_${suffix}`;
+const ctId = `ct_verif_${suffix}`;
+const inmueble = {
+  id: propId,
+  address: "calle sintética 2",
+  cadastralReference: "SINT-0000",
+  owner: "both",
+  ownershipPercentageUser1: 60,
+  ownershipPercentageUser2: 40,
+  tenantName: "Inq",
+  tenantDni: "00000000T",
+  monthlyRent: 800,
+  contract: { startDate: "2026-01-01", monthlyRent: 800, pdfVaultId: fileId },
+  tenantHistory: [{ id: ctId, tenantName: "Inq", tenantDni: "00000000T", startDate: "2026-01-01", monthlyRent: 800 }],
+  documents: [{ id: `doc_verif_${suffix}`, name: "verificacion.png", size: "16 B", type: "image/png", category: "otros", year: 2026, uploadDate: "2026-10-11", vaultId: fileId }],
+};
+if (mode === "modern") {
+  const putOwn = await req("POST", url("entities.put", "/api/vault/entities"), {
+    token: accA.token,
+    body: { type: "owners", id: "user1", entity: { id: "user1", name: "Titular Uno", dni: "00000001R" } },
+  });
+  check("V10a. titular persistido como entidad remota", putOwn.status === 201, `status=${putOwn.status}`);
+  const putProp = await req("POST", url("entities.put", "/api/vault/entities"), {
+    token: accA.token,
+    body: { type: "properties", id: propId, entity: inmueble },
+  });
+  check("V10b. inmueble con titularidad, contrato y documento (relaciones por id)", putProp.status === 201, `status=${putProp.status}`);
+  const putCt = await req("POST", url("entities.put", "/api/vault/entities"), {
+    token: accA.token,
+    body: { type: "contracts", id: ctId, entity: { id: ctId, propertyId: propId, monthlyRent: 800 } },
+  });
+  check("V10c. contrato relacionado por propertyId", putCt.status === 201, `status=${putCt.status}`);
+  // Idempotencia: reintentar no duplica.
+  await req("POST", url("entities.put", "/api/vault/entities"), { token: accA.token, body: { type: "properties", id: propId, entity: inmueble } });
+  const listProps = await req("GET", `${url("entities.list", "/api/vault/entities")}&type=properties`, { token: accA.token });
+  const propCopies = (listProps.json?.entities || []).filter((e) => e.id === propId).length;
+  check("V10d. reintentar la entidad no la duplica", propCopies === 1, `copias=${propCopies}`);
+  // Aislamiento.
+  const listPropsB = await req("GET", `${url("entities.list", "/api/vault/entities")}&type=properties`, { token: accB.token });
+  check("V10e. otra cuenta no ve las entidades ajenas", (listPropsB.json?.entities || []).length === 0, `total=${(listPropsB.json?.entities || []).length}`);
+  const delB = await req("DELETE", `${urlWithId("entities.delete", "/api/vault/entities", propId)}&type=properties`, { token: accB.token });
+  check("V10f. otra cuenta no puede borrar la entidad ajena", delB.status === 404, `status=${delB.status}`);
+}
+
 // --- V6: nuevas ejecuciones del backend --------------------------------------
 console.log("[persistencia] segunda ronda tras pausa (nueva ejecución serverless)…");
 await new Promise((r) => setTimeout(r, 2500));
@@ -201,6 +246,15 @@ const movs2 = await req("GET", url("movimientos", "/api/vault/movimientos"), { t
 check("V6a. el documento se recupera tras nuevas ejecuciones del backend", dl2.status === 200 && sha256(dl2.bytes || new Uint8Array()) === expectedSha, `status=${dl2.status}`);
 check("V6b. el listado sigue completo tras nuevas ejecuciones", (list2.json?.files || []).some((f) => f.id === fileId), `total=${(list2.json?.files || []).length}`);
 check("V6c. los movimientos siguen intactos tras nuevas ejecuciones", (movs2.json?.movements || []).some((m) => m.id === movId), `total=${(movs2.json?.movements || []).length}`);
+if (mode === "modern") {
+  const props2 = await req("GET", `${url("entities.list", "/api/vault/entities")}&type=properties`, { token: accA.token });
+  const rec = (props2.json?.entities || []).find((e) => e.id === propId);
+  check(
+    "V6d. la entidad patrimonial y sus relaciones sobreviven a nuevas ejecuciones",
+    Boolean(rec) && rec.data?.contract?.pdfVaultId === fileId && rec.data?.ownershipPercentageUser1 === 60 && rec.data?.tenantHistory?.[0]?.id === ctId,
+    rec ? `relaciones=${rec.data?.contract?.pdfVaultId === fileId ? "ok" : "rotas"}` : "entidad ausente"
+  );
+}
 
 // --- V7: idempotencia --------------------------------------------------------
 const upRetry = await req("POST", url("files.upload", "/api/vault/files"), {

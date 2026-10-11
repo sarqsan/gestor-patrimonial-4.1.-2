@@ -29,6 +29,7 @@ import {
   sha256Hex,
   VAULT_MAX_FILE_BYTES,
 } from "./persistence.js";
+import { isVaultEntityType } from "./persistenceTypes.js";
 import type { VaultAuditEvent, VaultFileMeta, VaultPersistence } from "./persistenceTypes.js";
 
 export interface VaultRouterOptions {
@@ -79,6 +80,9 @@ export const VAULT_OPERATION_SPECS: Record<string, VaultOpSpec> = {
   "auth.login": { methods: ["POST"], path: "/auth/login" },
   session: { methods: ["GET"], path: "/session" },
   movimientos: { methods: ["GET", "PUT"], path: "/movimientos" },
+  "entities.list": { methods: ["GET"], path: "/entities" },
+  "entities.put": { methods: ["POST"], path: "/entities" },
+  "entities.delete": { methods: ["DELETE"], path: (id) => `/entities/${id}`, requiresId: true },
   files: { methods: ["GET", "POST"], path: "/files" },
   "files.list": { methods: ["GET"], path: "/files" },
   "files.upload": { methods: ["POST"], path: "/files" },
@@ -319,6 +323,63 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       const saved = await persistence.putMovements(user, movements);
       await audit(user, { action: "movements.put", ok: true, detail: `${saved} movimientos` });
       res.json({ ok: true, saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Entidades estructuradas de la cartera (titulares, inmuebles, contratos, recibos, ajustes).
+   * Una entidad es un objeto JSON por identificador bajo la cuenta del token: reintentar es
+   * idempotente y las relaciones viajan por identificador dentro del objeto (propertyId, …).
+   */
+  router.get("/entities", requireAuth, async (req: Request, res, next) => {
+    try {
+      const type = req.query.type;
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      res.json({ ok: true, type, entities: await persistence.listEntities((req as any).vaultUser, type) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/entities", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const { type, id, entity } = req.body ?? {};
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      const clean = safeSegment(id);
+      if (!clean) return badRequest(res, "Identificador de entidad no válido (letras, números, guiones).");
+      if (entity === null || typeof entity !== "object") {
+        return badRequest(res, "Falta el contenido de la entidad (entity: objeto JSON).");
+      }
+      const record = await persistence.putEntity(user, type, clean, entity);
+      await audit(user, { action: "entity.put", ok: true, target: `${type}:${clean}` });
+      res.status(201).json({ ok: true, entity: record });
+    } catch (err: any) {
+      if (err instanceof Error && /no admitido|no válido|límite/i.test(err.message)) return badRequest(res, err.message);
+      next(err);
+    }
+  });
+
+  router.delete("/entities/:id", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const type = req.query.type;
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      const deleted = await persistence.deleteEntity(user, type, req.params.id);
+      if (!deleted) {
+        res.status(404).json({ ok: false, error: "La entidad no existe para esta cuenta." });
+        return;
+      }
+      await audit(user, { action: "entity.delete", ok: true, target: `${type}:${req.params.id}` });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }

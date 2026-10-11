@@ -62,6 +62,7 @@ compatible con Vercel» más abajo.
 | `GET /api/vault?op=expediente&from=…&to=…` · `GET /api/vault?op=expediente.zip` | Expediente fiscal por fechas (JSON o ZIP único) |
 | `POST/GET /api/vault?op=backups.create` · `GET /api/vault?op=backups.get&id=…` · `GET /api/vault?op=backups.list` | Copias de la cartera |
 | `GET /api/vault?op=audit&limit=…` | Trazabilidad de las operaciones de la propia cuenta |
+| `GET /api/vault?op=entities.list&type=…` · `POST /api/vault?op=entities.put` · `DELETE /api/vault?op=entities.delete&id=…&type=…` | Entidades estructuradas de la cartera (titulares, inmuebles, contratos, recibos, ajustes): una por identificador, idempotentes — ver `docs/matriz-entidades-patrimoniales.md` |
 
 También se aceptan los nombres cortos por recurso y Método (`op=files`, `op=backups`,
 `op=movimientos`) y la **ruta anidada clásica** (`GET /api/vault/files/:id`, …) donde la petición
@@ -100,7 +101,12 @@ segmento de ruta con la operación en la consulta:
 
 Verificación automatizada: `server/vault/routingCompatibility.test.ts` (R1–R7: llegada al router,
 equivalencia de formas, autenticación idéntica, aislamiento entre cuentas, errores explícitos,
-regresión del montaje Express y tabla de operaciones).
+regresión del montaje Express y tabla de operaciones). **Evidencia real del despliegue** (GitHub
+Actions → `scripts/verificacion-persistencia.mjs`): en producción, `/api/vault/health` (anidada)
+responde 404 `text/plain` de la plataforma (confirmado: nunca alcanza Express) mientras
+`/api/vault?op=health` sí alcanza la aplicación; la previsualización del PR está protegida por
+SSO de Vercel («Protected by Vercel Authentication», 302) y requiere una acción del propietario
+para verificarla automáticamente.
 
 ## 2. Configuración necesaria en Vercel
 

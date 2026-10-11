@@ -57,6 +57,25 @@ export interface VaultFileMeta {
   sha256VerifiedBy?: "server";
 }
 
+/**
+ * Tipos de entidad patrimonial estructurada admitidos en el almacén remoto. Una entidad es un
+ * objeto JSON por identificador bajo la carpeta de la cuenta: reintentar es idempotente y dos
+ * escrituras concurrentes sobre entidades distintas no se pisan.
+ */
+export const VAULT_ENTITY_TYPES = ["owners", "properties", "contracts", "payments", "settings"] as const;
+export type VaultEntityType = (typeof VAULT_ENTITY_TYPES)[number];
+
+export function isVaultEntityType(value: unknown): value is VaultEntityType {
+  return typeof value === "string" && (VAULT_ENTITY_TYPES as readonly string[]).includes(value);
+}
+
+/** Entidad estructurada persistida. `data` es el objeto de dominio (sin datos fiscales ocultos). */
+export interface VaultEntityRecord {
+  id: string;
+  updatedAt: string;
+  data: unknown;
+}
+
 /** Evento de auditoría: solo identificadores y metadatos técnicos, nunca datos fiscales. */
 export interface VaultAuditEvent {
   id: string;
@@ -65,6 +84,8 @@ export interface VaultAuditEvent {
     | "user.register"
     | "user.login"
     | "movements.put"
+    | "entity.put"
+    | "entity.delete"
     | "file.upload"
     | "file.upload.direct"
     | "file.download"
@@ -91,6 +112,11 @@ export interface VaultPersistence {
 
   getMovements(username: string): Promise<Record<string, any>[]>;
   putMovements(username: string, movements: Record<string, any>[]): Promise<number>;
+
+  /** Entidades estructuradas de la cartera (una por identificador, idempotentes). */
+  listEntities(username: string, type: VaultEntityType): Promise<VaultEntityRecord[]>;
+  putEntity(username: string, type: VaultEntityType, id: string, data: unknown): Promise<VaultEntityRecord>;
+  deleteEntity(username: string, type: VaultEntityType, id: string): Promise<boolean>;
 
   listFiles(username: string): Promise<VaultFileMeta[]>;
   getFileMeta(username: string, fileId: string): Promise<VaultFileMeta | null>;
