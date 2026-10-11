@@ -46,6 +46,12 @@ jobs:
         with:
           node-version: "20"
       - name: Verificación sintética end-to-end
+        env:
+          # Bypass autorizado y limitado del SSO de previews: «Protection Bypass for
+          # Automation» de Vercel, entregado por el usuario como secreto de Actions.
+          # No desactiva la protección; solo permite la automatización. Vacío = sin bypass
+          # (el SSO se documenta como bloqueo). El valor nunca se imprime.
+          VERCEL_PROTECTION_BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -o pipefail
           node scripts/verificacion-persistencia.mjs "${{ matrix.target_url }}" | tee /tmp/verif.out

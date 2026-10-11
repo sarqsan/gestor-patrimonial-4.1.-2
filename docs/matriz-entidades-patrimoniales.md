@@ -87,6 +87,17 @@ cuentas (lectura, borrado, listados); identificadores manipulados rechazados; fa
 error explícito y sin metadatos huérfanos. Complemento en producción: `scripts/verificacion-persistencia.mjs`
 (ejecutable contra un despliegue real por GitHub Actions).
 
+### Matriz de aceptación por niveles (cada evidencia en SU nivel)
+
+| Nivel | Qué demuestra | Cómo se ejecuta | Resultado actual |
+| --- | --- | --- | --- |
+| Prueba unitaria | Comportamiento aislado de una función | `npm test` (suites cliente: portfolioRemote, movementService, vaultClient, attachments, recoveryImport, …) | ✅ 246 pruebas en verde |
+| Prueba de integración local | Interacción entre componentes en el entorno de prueba | Suites servidor contra la app Express real + doble de Blob (`npm test`): vault, persistenceBlob, routingCompatibility, importProcedure, entities, patrimonialIntegration + E2E local (`scripts/verificacion-persistencia.mjs` contra backend local) | ✅ 42 pruebas + 32/32 comprobaciones E2E locales |
+| Preview real | Comportamiento del código desplegado en Vercel | Workflow «Verificación de persistencia» contra la URL de preview (CI de GitHub) | ⛔ Bloqueado por SSO de Vercel (302). Mecanismo autorizado preparado: secreto `VERCEL_AUTOMATION_BYPASS_SECRET` («Protection Bypass for Automation») — ver §8 |
+| Producción | Comportamiento del despliegue público y sus servicios efectivos | Mismo workflow contra `https://gestor-patrimonial-4-1-2.vercel.app` | ⏳ Pendiente del merge (el código de producción actual aún no incluye la corrección de rutas; evidencia del fallo real en el PR #13) |
+
+Ningún resultado de un nivel se atribuye a otro.
+
 ## 7. Importación de datos descargados (Fase 6)
 
 Procedimiento probado con conjunto pequeño (F1–F5 en `server/vault/importProcedure.test.ts` +
@@ -96,3 +107,27 @@ sin importar a medias), conservación de identificadores y relaciones, detecció
 (`planRecoveryMerge`, con revisión ANTES de confirmar en `RecoveryPreviewPanel`), recuentos
 antes/después y asociación de documentos (externalización con referencia estable por hash). La
 importación masiva en producción queda pendiente de la decisión del propietario.
+
+## 8. Verificación contra despliegues reales y bypass del SSO (mecanismo autorizado)
+
+El entorno de trabajo solo puede alcanzar despliegues reales a través del workflow de GitHub
+Actions «Verificación de persistencia (despliegue real)» (`.github/workflows/verificacion-persistencia.yml`),
+que ejecuta `scripts/verificacion-persistencia.mjs` contra preview y producción con cuentas y
+documentos sintéticos y publica la evidencia como comentario del PR.
+
+Los previews del proyecto están protegidos con la autenticación de Vercel (SSO). El mecanismo
+**autorizado y limitado** para que la automatización los verifique sin desactivar la protección es
+el *Protection Bypass for Automation* de Vercel:
+
+1. En Vercel → proyecto `gestor-patrimonial-4-1-2` → Settings → Deployment Protection →
+   *Protection Bypass for Automation* → **Generate secret** (Vercel lo muestra una sola vez).
+2. En GitHub → repo → Settings → Secrets and variables → Actions → **New repository secret**:
+   - **Nombre**: `VERCEL_AUTOMATION_BYPASS_SECRET`
+   - **Valor**: el secreto generado en Vercel.
+
+Con ese secreto presente, el workflow lo envía solo como cabecera `x-vercel-protection-bypass`
+en las peticiones de verificación. El valor no se imprime, no se registra y no aparece en la
+documentación ni en los comentarios del PR. Sin el secreto, el SSO se documenta como bloqueo y
+**no** se presenta ninguna prueba local como si fuera una prueba de preview.
+
+La verificación de producción no necesita bypass (el despliegue público no tiene SSO).

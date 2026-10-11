@@ -37,6 +37,15 @@ function check(name, ok, detail = "") {
   return Boolean(ok);
 }
 
+/**
+ * Bypass autorizado y limitado de la protección de despliegue de Vercel (SSO): si el
+ * secreto «Protection Bypass for Automation» está disponible como variable de entorno,
+ * se envía SOLO como cabecera `x-vercel-protection-bypass`. Nunca se imprime ni se
+ * registra su valor. Sin la variable, el comportamiento es el actual (y el SSO se
+ * documenta como bloqueo, no se evita).
+ */
+const VERCEL_BYPASS = process.env.VERCEL_PROTECTION_BYPASS || "";
+
 async function req(method, url, { token, body, raw } = {}) {
   let res;
   try {
@@ -44,6 +53,7 @@ async function req(method, url, { token, body, raw } = {}) {
       method,
       redirect: "manual",
       headers: {
+        ...(VERCEL_BYPASS ? { "x-vercel-protection-bypass": VERCEL_BYPASS } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
