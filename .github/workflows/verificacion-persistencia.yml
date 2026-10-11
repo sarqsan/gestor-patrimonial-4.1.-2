@@ -1,0 +1,94 @@
+# Verificación de persistencia contra un despliegue REAL (producción o previsualización).
+#
+# Datos sintéticos, sin secretos. El runner de GitHub sí puede alcanzar vercel.app (el entorno
+# de desarrollo de Arena no), de modo que esta es la vía autorizada para obtener evidencia real
+# del despliegue: enrutado, almacén Blob, SHA-256, persistencia tras reinicios y aislamiento.
+#
+# La evidencia se publica como comentario del PR de la rama (además de en los logs y anotaciones)
+# porque los logs de Actions no siempre son descargables desde el entorno de desarrollo.
+name: Verificación de persistencia (despliegue real)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - arena/e65d6133-gestor-patrimonial-4-1-2
+    paths:
+      - "scripts/**"
+      - ".github/workflows/verificacion-persistencia.yml"
+      - "server/**"
+      - "api/**"
+      - "src/lib/vaultClient.ts"
+      - "src/lib/portfolioRemote.ts"
+      - "docs/**"
+      - "vercel.json"
+      - "package.json"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nombre: produccion
+            target_url: "https://gestor-patrimonial-4-1-2.vercel.app"
+          - nombre: preview
+            target_url: "https://gestor-patrimonial-4-1-2-git-are-a5aac8-sarqsan2-4111s-projects.vercel.app"
+    name: verificar (${{ matrix.nombre }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verificación sintética end-to-end
+        env:
+          # Bypass autorizado y limitado del SSO de previews: «Protection Bypass for
+          # Automation» de Vercel, entregado por el usuario como secreto de Actions.
+          # No desactiva la protección; solo permite la automatización. Vacío = sin bypass
+          # (el SSO se documenta como bloqueo). El valor nunca se imprime.
+          VERCEL_PROTECTION_BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -o pipefail
+          node scripts/verificacion-persistencia.mjs "${{ matrix.target_url }}" | tee /tmp/verif.out
+      - name: Publicar evidencia en el PR de la rama
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target_url }}
+          NOMBRE: ${{ matrix.nombre }}
+        run: |
+          MARK="<!-- verificacion-persistencia-$NOMBRE -->"
+          {
+            echo "$MARK"
+            echo "### 🧪 Verificación de persistencia — $NOMBRE"
+            echo ""
+            echo "- Objetivo: \`$TARGET\`"
+            echo "- Ejecución: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- Resultado del paso: ${{ job.status }}"
+            echo ""
+            echo '```'
+            tail -n 200 /tmp/verif.out 2>/dev/null || echo "(sin salida registrada)"
+            echo '```'
+          } > /tmp/evidencia.md
+          # Nota: los tokens de integración no pueden editar/borrar comentarios (API 404),
+          # así que se publica SIEMPRE un comentario nuevo por ejecución y destino; el
+          # histórico documenta cada pasada. Un fallo aquí se avisa sin enmascarar el veredicto.
+          PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "Sin PR abierto para $GITHUB_REF_NAME: la evidencia queda solo en la ejecución."
+            exit 0
+          fi
+          if gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@/tmp/evidencia.md > /dev/null; then
+            echo "Evidencia publicada como comentario del PR #$PR ($NOMBRE, ejecución ${{ github.run_id }})."
+          else
+            echo "::warning::No se pudo publicar la evidencia como comentario del PR #$PR ($NOMBRE)."
+          fi
+          exit 0
+# (re-verificación del candidato tras configurar el bypass)

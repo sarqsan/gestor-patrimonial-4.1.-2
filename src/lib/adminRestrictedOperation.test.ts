@@ -37,7 +37,7 @@ import {
   __setSignInDriverForTests,
   auth,
 } from "./firebase";
-import { ensureFirebaseSession, uploadAttachment, AttachmentError } from "./attachments";
+import { ensureFirebaseSession, uploadAttachment, invalidateFirebaseStorageProbe, AttachmentError } from "./attachments";
 
 const ADMIN_CODE = "auth/admin-restricted-operation";
 const NETWORK_CODE = "auth/network-request-failed";
@@ -175,7 +175,9 @@ test("R6. Bajo restricción administrativa no se intenta ninguna subida a Storag
   const { driver, calls } = adminRestrictedDriver();
   __setSignInDriverForTests(driver);
   try {
-    // Contratos: sin vía local equivalente → la subida se cancela ANTES de tocar Storage.
+    // NINGUNA carpeta degrada a almacenamiento del navegador: si el destino remoto no está
+    // disponible, la subida se cancela con un error explícito (sin falso éxito y sin
+    // guardar el archivo solo en este dispositivo).
     const contractFile = new File([new Uint8Array(256)], "contrato.doc", { type: "application/msword" });
     await assert.rejects(
       () => uploadAttachment({ userId: "rentasync", folder: "contracts", file: contractFile, allowWordDocument: true }),
@@ -187,13 +189,28 @@ test("R6. Bajo restricción administrativa no se intenta ninguna subida a Storag
       }
     );
 
-    // Comprobantes: vía local de contingencia (modo local-inline), igualmente sin tocar Storage.
+    // Comprobantes: mismo criterio. No hay modo local y el mensaje lo deja claro.
     const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "comprobante.png", { type: "image/png" });
-    const stored = await uploadAttachment({ userId: "rentasync", folder: "expenses", file });
-    assert.equal(stored.mode, "local-inline");
-    assert.equal(stored.storagePath, undefined, "no se genera ruta de Storage bajo bloqueo administrativo");
+    await assert.rejects(
+      () => uploadAttachment({ userId: "rentasync", folder: "expenses", file }),
+      (err: any) => {
+        assert.ok(err instanceof AttachmentError);
+        assert.match(err.message, /no se ha guardado|no está activo|no está disponible/i);
+        assert.doesNotMatch(err.message, /resumen|óptima|correctamente/i, "no debe anunciar ningún guardado");
+        return true;
+      }
+    );
 
-    assert.equal(calls.count, 2, "una consulta al servicio de autenticación por intento");
+    // Política de reintentos: un rechazo ADMINISTRATIVO no se resuelve reintentando, así que no
+    // se interroga al servicio en cada intento (una consulta). Un fallo transitorio de red sí se
+    // reintenta: `invalidateFirebaseStorageProbe()` obliga a una nueva comprobación.
+    assert.equal(calls.count, 1, "un bloqueo administrativo no se reintenta en cada subida");
+    invalidateFirebaseStorageProbe();
+    await assert.rejects(
+      () => uploadAttachment({ userId: "rentasync", folder: "expenses", file }),
+      (err: any) => err instanceof AttachmentError
+    );
+    assert.equal(calls.count, 2, "tras invalidar la comprobación se vuelve a consultar el servicio");
   } finally {
     __setSignInDriverForTests(null);
   }

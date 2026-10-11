@@ -1,30 +1,146 @@
 // Rutas HTTP del vault. Se montan en /api/vault dentro de la aplicación Express existente
-// (server/apiApp.ts), compartida por Render (server.ts) y Vercel (api/[...route].ts).
+// (server/apiApp.ts), compartida por Vercel (api/[...route].ts) y el servidor local (server.ts).
 //
-// Seguridad: todas las operaciones de datos exigen token de sesión (Bearer). Los recursos
-// se resuelven SIEMPRE bajo el directorio del usuario del token: no existe ninguna ruta que
-// permita leer o escribir datos de otra cuenta. Registro y login son los únicos endpoints
-// abiertos (junto con health), y no exponen información de cuentas ajenas.
+// Enrutado compatible con Vercel:
+//  - En Vercel, las rutas ANIDADAS (/api/vault/files/:id, ...) devolvían un 404 de la propia
+//    plataforma ANTES de alcanzar Express. La forma que siempre llega al router es la de UN
+//    solo segmento de ruta con la operación en la consulta: `/api/vault?op=<operación>[&id=…]`.
+//  - Este router incluye la capa de compatibilidad que TRADUCE `?op=` a la ruta interna
+//    equivalente (misma petición, mismos controles de autenticación y autorización). La forma
+//    anidada clásica sigue funcionando donde sí alcanza Express (local/Render): nada del
+//    montaje existente cambia.
+//
+// Seguridad:
+//  - Todas las operaciones de datos exigen token de sesión (Bearer). Los recursos se resuelven
+//    SIEMPRE bajo el directorio del usuario del token: no existe ruta que permita leer o
+//    escribir datos de otra cuenta.
+//  - El contenido binario vive en el almacén remoto PRIVADO; el cliente nunca recibe su URL ni
+//    credencial alguna del almacén. Las descargas se sirven autenticadas por este router.
+//  - Las subidas directas (archivos grandes) usan una firma de un solo objeto, con operación,
+//    tipo y tamaño acotados y caducidad corta; el servidor recalcula el SHA-256 de lo recibido.
+//  - Los errores no incluyen datos fiscales ni secretos; la auditoría guarda solo identificadores.
 import { Router, Request, Response, NextFunction } from "express";
-import { VaultStore, VAULT_MAX_FILE_BYTES } from "./store.js";
-import { createSessionToken, verifySessionToken, normalizeUsername, passwordProblem } from "./auth.js";
+import { createSessionToken, verifySessionToken, normalizeUsername, passwordProblem, hashPassword } from "./auth.js";
 import { buildZip, type ZipEntry } from "./zip.js";
+import {
+  VaultStorageUnavailableError,
+  auditId,
+  safeSegment,
+  sha256Hex,
+  VAULT_MAX_FILE_BYTES,
+} from "./persistence.js";
+import { isVaultEntityType } from "./persistenceTypes.js";
+import type { VaultAuditEvent, VaultFileMeta, VaultPersistence } from "./persistenceTypes.js";
 
 export interface VaultRouterOptions {
-  store: VaultStore;
+  persistence: VaultPersistence;
   /** Secreto HMAC para firmar sesiones. Si no se pasa, se genera/persiste en el almacén. */
   secret?: string;
+  /** Firma de subidas directas (solo disponible con almacén remoto). */
+  presign?: (opts: {
+    username: string;
+    fileId: string;
+    contentType: string;
+    maxBytes: number;
+    validUntil: number;
+  }) => Promise<{ url: string; headers: Record<string, string>; validUntil: number } | null>;
+}
+
+/** Tipos admitidos: espejo de storage.rules (PDF, imágenes y .doc de contratos). */
+export function vaultContentTypeProblem(contentType: string): string | null {
+  const t = (contentType || "").toLowerCase();
+  if (t === "application/pdf" || t === "application/msword") return null;
+  if (t.startsWith("image/")) return null;
+  return `Tipo no admitido por el vault (${t || "sin tipo"}). Usa PDF, imágenes o .doc de contratos.`;
+}
+
+export function vaultFileId(): string {
+  return `file_${Date.now()}_${Math.floor(Math.random() * 1e12).toString(36)}`;
+}
+
+// ---------- capa de compatibilidad de enrutado (`?op=`) ----------
+
+type VaultOpSpec = {
+  /** Métodos HTTP admitidos para la operación. */
+  methods: string[];
+  /** Ruta interna del router; con `id`, plantilla que lo recibe ya validado. */
+  path: string | ((id: string) => string);
+  /** La operación necesita `id` en la consulta. */
+  requiresId?: boolean;
+};
+
+/**
+ * Operaciones de la forma compatible `/api/vault?op=<operación>[&id=…]`. Cada una se traduce a
+ * la ruta interna equivalente; los nombres explícitos (`files.get`, `files.delete`, ...) y los
+ * nombres cortos por recurso+Método (`files`, `backups`, `movimientos`) son equivalentes.
+ */
+export const VAULT_OPERATION_SPECS: Record<string, VaultOpSpec> = {
+  health: { methods: ["GET"], path: "/health" },
+  "auth.register": { methods: ["POST"], path: "/auth/register" },
+  "auth.login": { methods: ["POST"], path: "/auth/login" },
+  session: { methods: ["GET"], path: "/session" },
+  movimientos: { methods: ["GET", "PUT"], path: "/movimientos" },
+  "entities.list": { methods: ["GET"], path: "/entities" },
+  "entities.put": { methods: ["POST"], path: "/entities" },
+  "entities.delete": { methods: ["DELETE"], path: (id) => `/entities/${id}`, requiresId: true },
+  files: { methods: ["GET", "POST"], path: "/files" },
+  "files.list": { methods: ["GET"], path: "/files" },
+  "files.upload": { methods: ["POST"], path: "/files" },
+  "files.presign": { methods: ["POST"], path: "/files/presign" },
+  "files.commit": { methods: ["POST"], path: (id) => `/files/${id}/commit`, requiresId: true },
+  "files.get": { methods: ["GET"], path: (id) => `/files/${id}`, requiresId: true },
+  "files.delete": { methods: ["DELETE"], path: (id) => `/files/${id}`, requiresId: true },
+  expediente: { methods: ["GET"], path: "/expediente" },
+  "expediente.zip": { methods: ["GET"], path: "/expediente.zip" },
+  backups: { methods: ["GET", "POST"], path: "/backups" },
+  "backups.list": { methods: ["GET"], path: "/backups" },
+  "backups.create": { methods: ["POST"], path: "/backups" },
+  "backups.get": { methods: ["GET"], path: (id) => `/backups/${id}`, requiresId: true },
+  audit: { methods: ["GET"], path: "/audit" },
+};
+
+export type VaultOpResolution = { path: string } | { status: number; error: string };
+
+/**
+ * Resuelve `?op=<operación>[&id=…]` a la ruta interna del router, o a un error explícito.
+ * No hay silencio: operación desconocida, método no admitido o identificador ausente/manipulado
+ * se rechazan con un mensaje claro (nunca se degradan a un 404 genérico de plataforma).
+ */
+export function resolveVaultOperation(op: string, method: string, id: string): VaultOpResolution {
+  const spec = VAULT_OPERATION_SPECS[op];
+  const httpMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+  if (!spec) {
+    return {
+      status: 400,
+      error: `Operación no admitida en el almacén remoto (${op}). Usa /api/vault?op=<operación>[&id=…].`,
+    };
+  }
+  if (!spec.methods.includes(httpMethod)) {
+    return {
+      status: 405,
+      error: `La operación ${op} no admite el método ${httpMethod} (admitidos: ${spec.methods.join(", ")}).`,
+    };
+  }
+  if (typeof spec.path === "string") return { path: spec.path };
+  const clean = safeSegment(id);
+  if (!clean) {
+    return {
+      status: 400,
+      error: `La operación ${op} necesita un identificador válido (?id=…: letras, números, guiones).`,
+    };
+  }
+  return { path: spec.path(encodeURIComponent(clean)) };
 }
 
 /** Extrae y valida el usuario del token Bearer. */
-async function authedUser(req: Request, store: VaultStore, secret: string): Promise<string | null> {
+async function authedUser(req: Request, persistence: VaultPersistence, secret: string): Promise<string | null> {
   const header = req.get("authorization") || "";
   const m = /^Bearer\s+(.+)$/i.exec(header);
   if (!m) return null;
   const user = verifySessionToken(secret, m[1].trim());
   if (!user) return null;
-  // Defensa en profundidad: el usuario del token debe existir en el índice.
-  const record = await store.getUser(user);
+  // Defensa en profundidad: el usuario del token debe existir.
+  const record = await persistence.getUser(user);
   return record ? user : null;
 }
 
@@ -33,19 +149,36 @@ function badRequest(res: Response, message: string): void {
 }
 
 export function createVaultRouter(options: VaultRouterOptions): Router {
-  const { store } = options;
+  const { persistence } = options;
   const router = Router();
   let secretPromise: Promise<string> | null = options.secret ? Promise.resolve(options.secret) : null;
 
   const getSecret = (): Promise<string> => {
-    if (!secretPromise) secretPromise = store.ensureSecret();
+    if (!secretPromise) secretPromise = persistence.ensureSecret();
     return secretPromise;
+  };
+
+  const audit = async (
+    username: string,
+    event: Omit<VaultAuditEvent, "id" | "at" | "actor">
+  ): Promise<void> => {
+    try {
+      await persistence.appendAudit(username, {
+        id: auditId(),
+        at: new Date().toISOString(),
+        actor: username,
+        ...event,
+      });
+    } catch {
+      // La auditoría es accesoria: su fallo no debe tumbar la operación principal ni
+      // provocar un falso éxito (la operación ya se ha confirmado con el almacén).
+    }
   };
 
   const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const secret = await getSecret();
-      const user = await authedUser(req, store, secret);
+      const user = await authedUser(req, persistence, secret);
       if (!user) {
         res.status(401).json({ ok: false, error: "Sesión no válida o caducada. Inicia sesión de nuevo." });
         return;
@@ -57,9 +190,65 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   };
 
+  // ---------- traducción de la forma compatible (?op=) ----------
+  // Debe registrarse ANTES que ninguna ruta: traduce `/api/vault?op=…&id=…` a la ruta interna
+  // equivalente y continúa el despacho normal del router (mismos middlewares y controles).
+  router.use((req: Request, res: Response, next: NextFunction) => {
+    try {
+      const opValue = req.query.op;
+      if (opValue === undefined) return next(); // forma anidada clásica: sin traducción
+      // La forma compatible es de un solo segmento: no se admite combinarla con una ruta anidada.
+      const residual = (req.url.split("?")[0] || "/").replace(/\/+$/, "") || "/";
+      if (residual !== "/") {
+        return res.status(400).json({
+          ok: false,
+          error: "Usa /api/vault?op=<operación>[&id=…] (sin ruta anidada) o la ruta anidada clásica, no ambas.",
+        });
+      }
+      if (typeof opValue !== "string") {
+        return res.status(400).json({ ok: false, error: "Indica una única operación (?op=…)." });
+      }
+      const idValue = req.query.id;
+      if (idValue !== undefined && typeof idValue !== "string") {
+        return res.status(400).json({ ok: false, error: "Indica un único identificador (?id=…)." });
+      }
+      const resolved = resolveVaultOperation(opValue, req.method, typeof idValue === "string" ? idValue : "");
+      if ("error" in resolved) {
+        return res.status(resolved.status).json({ ok: false, error: resolved.error });
+      }
+      // El resto de la consulta (from, to, limit…) se conserva; op e id ya van en la ruta.
+      const rest = new URLSearchParams();
+      for (const key of Object.keys(req.query)) {
+        if (key === "op" || key === "id") continue;
+        const value = (req.query as Record<string, unknown>)[key];
+        if (typeof value === "string") rest.set(key, value);
+      }
+      const qs = rest.toString();
+      req.url = resolved.path + (qs ? `?${qs}` : "");
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ---------- abiertos ----------
-  router.get("/health", (_req, res) => {
-    res.json({ ok: true, vault: "ok", maxFileBytes: VAULT_MAX_FILE_BYTES });
+
+  /**
+   * Salud y capacidades. No expone información de cuentas: solo el estado del destino y los
+   * límites admitidos, para que la interfaz pueda avisar antes de intentar una subida.
+   */
+  router.get("/health", async (_req, res) => {
+    const probe = await persistence.probe().catch((err) => ({ ok: false, detail: String(err?.message || err) }));
+    res.json({
+      ok: true,
+      vault: "ok",
+      durable: persistence.durable,
+      driver: persistence.driver,
+      storageOk: probe.ok,
+      ...(probe.ok ? {} : { detail: probe.detail }),
+      maxFileBytes: VAULT_MAX_FILE_BYTES,
+      directUpload: Boolean(options.presign),
+    });
   });
 
   router.post("/auth/register", async (req, res, next) => {
@@ -69,8 +258,14 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       if (!username) return badRequest(res, "Nombre de usuario no válido (3-64 caracteres: letras, números, guiones).");
       const passProblem = passwordProblem(password);
       if (passProblem) return badRequest(res, passProblem);
-      const created = await store.createUser(username, password);
+      const { salt, hash } = hashPassword(password);
+      const created = await persistence.createUser(username, {
+        salt,
+        hash,
+        createdAt: new Date().toISOString(),
+      });
       if (!created) return res.status(409).json({ ok: false, error: "Este nombre de usuario ya está registrado." });
+      await audit(username, { action: "user.register", ok: true });
       res.status(201).json({ ok: true, username });
     } catch (err) {
       next(err);
@@ -82,10 +277,18 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       const username = normalizeUsername(req.body?.username);
       const password = req.body?.password;
       if (!username || typeof password !== "string") return badRequest(res, "Credenciales incompletas.");
-      const ok = await store.verifyUser(username, password);
-      if (!ok) return res.status(401).json({ ok: false, error: "Usuario o contraseña incorrectos." });
+      const record = await persistence.getUser(username);
+      const { verifyPassword } = await import("./auth.js");
+      const ok = record ? verifyPassword(password, record.salt, record.hash) : false;
+      if (!ok) {
+        // Solo se audita el intento fallido si la cuenta existe: así no se puede escribir
+        // en la trazabilidad de otra cuenta conociendo su nombre.
+        if (record) await audit(username, { action: "user.login", ok: false, detail: "credenciales" });
+        return res.status(401).json({ ok: false, error: "Usuario o contraseña incorrectos." });
+      }
       const secret = await getSecret();
       const token = createSessionToken(secret, username);
+      await audit(username, { action: "user.login", ok: true });
       res.json({ ok: true, username, token });
     } catch (err) {
       next(err);
@@ -94,12 +297,17 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   // ---------- autenticados ----------
   router.get("/session", requireAuth, (req: Request, res) => {
-    res.json({ ok: true, username: (req as any).vaultUser });
+    res.json({
+      ok: true,
+      username: (req as any).vaultUser,
+      durable: persistence.durable,
+      driver: persistence.driver,
+    });
   });
 
   router.get("/movimientos", requireAuth, async (req: Request, res, next) => {
     try {
-      const movements = await store.getMovements((req as any).vaultUser);
+      const movements = await persistence.getMovements((req as any).vaultUser);
       res.json({ ok: true, movements });
     } catch (err) {
       next(err);
@@ -108,11 +316,70 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   router.put("/movimientos", requireAuth, async (req: Request, res, next) => {
     try {
+      const user = (req as any).vaultUser;
       const movements = req.body?.movements;
       if (!Array.isArray(movements)) return badRequest(res, "Se espera una lista de movimientos.");
       if (movements.length > 20_000) return badRequest(res, "Demasiados movimientos en una sola sincronización.");
-      const saved = await store.putMovements((req as any).vaultUser, movements);
+      const saved = await persistence.putMovements(user, movements);
+      await audit(user, { action: "movements.put", ok: true, detail: `${saved} movimientos` });
       res.json({ ok: true, saved });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Entidades estructuradas de la cartera (titulares, inmuebles, contratos, recibos, ajustes).
+   * Una entidad es un objeto JSON por identificador bajo la cuenta del token: reintentar es
+   * idempotente y las relaciones viajan por identificador dentro del objeto (propertyId, …).
+   */
+  router.get("/entities", requireAuth, async (req: Request, res, next) => {
+    try {
+      const type = req.query.type;
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      res.json({ ok: true, type, entities: await persistence.listEntities((req as any).vaultUser, type) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/entities", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const { type, id, entity } = req.body ?? {};
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      const clean = safeSegment(id);
+      if (!clean) return badRequest(res, "Identificador de entidad no válido (letras, números, guiones).");
+      if (entity === null || typeof entity !== "object") {
+        return badRequest(res, "Falta el contenido de la entidad (entity: objeto JSON).");
+      }
+      const record = await persistence.putEntity(user, type, clean, entity);
+      await audit(user, { action: "entity.put", ok: true, target: `${type}:${clean}` });
+      res.status(201).json({ ok: true, entity: record });
+    } catch (err: any) {
+      if (err instanceof Error && /no admitido|no válido|límite/i.test(err.message)) return badRequest(res, err.message);
+      next(err);
+    }
+  });
+
+  router.delete("/entities/:id", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const type = req.query.type;
+      if (!isVaultEntityType(type)) {
+        return badRequest(res, "Tipo de entidad no admitido (owners, properties, contracts, payments, settings).");
+      }
+      const deleted = await persistence.deleteEntity(user, type, req.params.id);
+      if (!deleted) {
+        res.status(404).json({ ok: false, error: "La entidad no existe para esta cuenta." });
+        return;
+      }
+      await audit(user, { action: "entity.delete", ok: true, target: `${type}:${req.params.id}` });
+      res.status(204).end();
     } catch (err) {
       next(err);
     }
@@ -120,15 +387,17 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   router.get("/files", requireAuth, async (req: Request, res, next) => {
     try {
-      const files = await store.listFiles((req as any).vaultUser);
+      const files = await persistence.listFiles((req as any).vaultUser);
       res.json({ ok: true, files });
     } catch (err) {
       next(err);
     }
   });
 
+  /** Subida en el cuerpo de la petición (archivos pequeños/medianos): el servidor calcula el hash. */
   router.post("/files", requireAuth, async (req: Request, res, next) => {
     try {
+      const user = (req as any).vaultUser;
       const { name, contentType, bytesBase64, movementId, propertyId, id } = req.body ?? {};
       if (typeof bytesBase64 !== "string" || !bytesBase64) return badRequest(res, "Falta el contenido del archivo (bytesBase64).");
       let bytes: Uint8Array;
@@ -141,7 +410,8 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       if (bytes.length > VAULT_MAX_FILE_BYTES) {
         return res.status(413).json({ ok: false, error: "El archivo supera el límite de 10 MB." });
       }
-      const meta = await store.putFile((req as any).vaultUser, {
+      const meta = await storeNewFile(persistence, {
+        username: user,
         id: typeof id === "string" ? id : undefined,
         name: typeof name === "string" ? name : "archivo",
         contentType: typeof contentType === "string" ? contentType : "",
@@ -149,7 +419,8 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
         movementId: typeof movementId === "string" ? movementId : undefined,
         propertyId: typeof propertyId === "string" ? propertyId : undefined,
       });
-      res.status(201).json({ ok: true, file: meta });
+      await audit(user, { action: "file.upload", ok: true, target: meta.id, detail: `${meta.size} bytes` });
+      res.status(201).json({ ok: true, file: publicFileMeta(meta), storageOk: true });
     } catch (err: any) {
       if (err instanceof Error && /límite|tipo no admitido|identificador|sobrescribe/i.test(err.message)) {
         return badRequest(res, err.message);
@@ -158,21 +429,117 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  /**
+   * Firma de una subida directa: el servidor decide el pathname, reserva el identificador y
+   * acota operación, tipo, tamaño y caducidad. El navegador nunca ve credenciales del almacén.
+   */
+  router.post("/files/presign", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      if (!options.presign) {
+        return res.status(501).json({ ok: false, error: "La subida directa no está disponible en este despliegue." });
+      }
+      const { name, contentType, size, movementId, propertyId } = req.body ?? {};
+      const typeProblem = vaultContentTypeProblem(typeof contentType === "string" ? contentType : "");
+      if (typeProblem) return badRequest(res, typeProblem);
+      const sizeNum = Number(size);
+      if (!Number.isFinite(sizeNum) || sizeNum <= 0) return badRequest(res, "Tamaño de archivo no válido.");
+      if (sizeNum > VAULT_MAX_FILE_BYTES) return res.status(413).json({ ok: false, error: "El archivo supera el límite de 10 MB." });
+
+      const fileId = vaultFileId();
+      const validUntil = Date.now() + 10 * 60 * 1000; // 10 minutos
+      const signed = await options.presign({
+        username: user,
+        fileId,
+        contentType,
+        maxBytes: Math.min(VAULT_MAX_FILE_BYTES, Math.ceil(sizeNum)),
+        validUntil,
+      });
+      if (!signed) return res.status(501).json({ ok: false, error: "La subida directa no está disponible en este despliegue." });
+
+      // Reserva de metadatos: mismo identificador, sin contenido todavía (se completa al confirmar).
+      await persistence.putFileMeta(user, {
+        id: fileId,
+        name: typeof name === "string" ? name.slice(0, 200) : "archivo",
+        contentType,
+        size: sizeNum,
+        sha256: "",
+        createdAt: new Date().toISOString(),
+        ...(typeof movementId === "string" ? { movementId } : {}),
+        ...(typeof propertyId === "string" ? { propertyId } : {}),
+        sha256VerifiedBy: "server",
+      });
+      await audit(user, { action: "file.upload.direct", ok: true, target: fileId, detail: "firma emitida" });
+      res.status(201).json({ ok: true, fileId, upload: signed });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /**
+   * Confirma una subida directa: el servidor descarga el objeto del almacén privado, recalcula
+   * el SHA-256 y solo entonces consolida los metadatos. Si el objeto no está o el hash no
+   * coincide, la subida NO se declara completada.
+   */
+  router.post("/files/:fileId/commit", requireAuth, async (req: Request, res, next) => {
+    try {
+      const user = (req as any).vaultUser;
+      const meta = await persistence.getFileMeta(user, req.params.fileId);
+      if (!meta) return res.status(404).json({ ok: false, error: "La subida no está reservada para esta cuenta." });
+      if (meta.sha256) return res.json({ ok: true, file: publicFileMeta(meta), storageOk: true, alreadyCommitted: true });
+
+      const bytes = await persistence.readFileBytes(user, req.params.fileId);
+      if (!bytes || bytes.length === 0) {
+        return res.status(409).json({
+          ok: false,
+          error: "El archivo no está en el almacenamiento remoto: la subida no se ha completado.",
+        });
+      }
+      const declared = Number(req.body?.size);
+      if (Number.isFinite(declared) && declared > 0 && declared !== bytes.length) {
+        return badRequest(res, "El tamaño declarado no coincide con el archivo recibido.");
+      }
+      const clientSha = typeof req.body?.sha256 === "string" ? req.body.sha256.toLowerCase() : "";
+      const serverSha = sha256Hex(bytes);
+      if (clientSha && clientSha !== serverSha) {
+        await persistence.deleteFileBytes(user, req.params.fileId);
+        await persistence.deleteFileMeta(user, req.params.fileId);
+        return badRequest(res, "El archivo recibido no coincide con su resumen SHA-256; se ha descartado.");
+      }
+      const committed: VaultFileMeta = { ...meta, size: bytes.length, sha256: serverSha, sha256VerifiedBy: "server" };
+      await persistence.putFileMeta(user, committed);
+      await audit(user, { action: "file.upload", ok: true, target: meta.id, detail: `${bytes.length} bytes (directa, verificada)` });
+      res.json({ ok: true, file: publicFileMeta(committed), storageOk: true, sha256: serverSha });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/files/:fileId", requireAuth, async (req: Request, res, next) => {
     try {
-      const got = await store.getFile((req as any).vaultUser, req.params.fileId);
-      if (!got) {
+      const user = (req as any).vaultUser;
+      const meta = await persistence.getFileMeta(user, req.params.fileId);
+      if (!meta || !meta.sha256) {
         res.status(404).json({ ok: false, error: "El archivo no existe para esta cuenta." });
         return;
       }
-      res.setHeader("content-type", got.meta.contentType || "application/octet-stream");
-      res.setHeader("content-length", String(got.bytes.length));
-      res.setHeader(
-        "content-disposition",
-        `attachment; filename="${encodeURIComponent(got.meta.name).replace(/["\\]/g, "")}"`
-      );
-      res.setHeader("x-vault-sha256", got.meta.sha256);
-      res.status(200).end(Buffer.from(got.bytes));
+      const bytes = await persistence.readFileBytes(user, req.params.fileId);
+      if (!bytes) {
+        res.status(404).json({ ok: false, error: "El archivo no existe para esta cuenta." });
+        return;
+      }
+      // Integridad a la salida: si el objeto almacenado no coincide con su hash, no se sirve.
+      const actual = sha256Hex(bytes);
+      if (actual !== meta.sha256) {
+        res.status(502).json({ ok: false, error: "El archivo almacenado no supera la verificación de integridad." });
+        return;
+      }
+      res.setHeader("content-type", meta.contentType || "application/octet-stream");
+      res.setHeader("content-length", String(bytes.length));
+      res.setHeader("content-disposition", `attachment; filename="${encodeURIComponent(meta.name).replace(/["\\]/g, "")}"`);
+      res.setHeader("x-vault-sha256", meta.sha256);
+      await audit(user, { action: "file.download", ok: true, target: meta.id });
+      res.status(200).end(Buffer.from(bytes));
     } catch (err) {
       next(err);
     }
@@ -180,55 +547,53 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   router.delete("/files/:fileId", requireAuth, async (req: Request, res, next) => {
     try {
-      const deleted = await store.deleteFile((req as any).vaultUser, req.params.fileId);
+      const user = (req as any).vaultUser;
+      const deleted = await persistence.deleteFileMeta(user, req.params.fileId);
       if (!deleted) {
         res.status(404).json({ ok: false, error: "El archivo no existe para esta cuenta." });
         return;
       }
+      await persistence.deleteFileBytes(user, req.params.fileId).catch(() => undefined);
+      await audit(user, { action: "file.delete", ok: true, target: req.params.fileId });
       res.status(204).end();
     } catch (err) {
       next(err);
     }
   });
 
-  // Expediente fiscal: movimientos y metadatos de archivos en un rango de fechas.
+  // ---------- expediente fiscal ----------
+  const filterByRange = (movements: Record<string, any>[], from: string, to: string) =>
+    movements.filter((m: any) => {
+      const date = typeof m?.date === "string" ? m.date : "";
+      if (from && date < from) return false;
+      if (to && date > to) return false;
+      return true;
+    });
+
   router.get("/expediente", requireAuth, async (req: Request, res, next) => {
     try {
       const user = (req as any).vaultUser;
       const from = typeof req.query.from === "string" ? req.query.from : "";
       const to = typeof req.query.to === "string" ? req.query.to : "";
-      const movements = await store.getMovements(user);
-      const filtered = movements.filter((m: any) => {
-        const date = typeof m?.date === "string" ? m.date : "";
-        if (from && date < from) return false;
-        if (to && date > to) return false;
-        return true;
-      });
-      const files = await store.listFiles(user);
-      res.json({ ok: true, username: user, from, to, movements: filtered, files });
+      const movements = filterByRange(await persistence.getMovements(user), from, to);
+      const files = await persistence.listFiles(user);
+      await audit(user, { action: "expediente.export", ok: true, detail: `${movements.length} movimientos` });
+      res.json({ ok: true, username: user, from, to, movements, files: files.map(publicFileMeta) });
     } catch (err) {
       next(err);
     }
   });
 
-  // Expediente fiscal completo: un único ZIP con movimientos + documentos vinculados.
   router.get("/expediente.zip", requireAuth, async (req: Request, res, next) => {
     try {
       const user = (req as any).vaultUser;
       const from = typeof req.query.from === "string" ? req.query.from : "";
       const to = typeof req.query.to === "string" ? req.query.to : "";
-      const movements = await store.getMovements(user);
-      const filtered = movements.filter((m: any) => {
-        const date = typeof m?.date === "string" ? m.date : "";
-        if (from && date < from) return false;
-        if (to && date > to) return false;
-        return true;
-      });
-      const allFiles = await store.listFiles(user);
+      const filtered = filterByRange(await persistence.getMovements(user), from, to);
+      const allFiles = await persistence.listFiles(user);
       const hasRange = Boolean(from || to);
       let included = allFiles;
       if (hasRange) {
-        // Solo documentos del periodo: vinculados por movimiento o referenciados en ellos.
         const movementIds = new Set(filtered.map((m: any) => m?.id).filter(Boolean));
         const referenced = new Set<string>();
         for (const m of filtered) {
@@ -236,9 +601,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
             if (typeof v === "string" && /^file_[A-Za-z0-9_-]+$/.test(v)) referenced.add(v);
           }
         }
-        included = allFiles.filter(
-          (f) => (f.movementId && movementIds.has(f.movementId)) || referenced.has(f.id)
-        );
+        included = allFiles.filter((f) => (f.movementId && movementIds.has(f.movementId)) || referenced.has(f.id));
       }
 
       const entries: ZipEntry[] = [
@@ -248,24 +611,22 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
             JSON.stringify({ username: user, from, to, exportedAt: new Date().toISOString(), movements: filtered }, null, 2)
           ),
         },
-        {
-          name: "archivos.json",
-          bytes: new TextEncoder().encode(JSON.stringify({ files: included }, null, 2)),
-        },
+        { name: "archivos.json", bytes: new TextEncoder().encode(JSON.stringify({ files: included.map(publicFileMeta) }, null, 2)) },
       ];
       const usedNames = new Set<string>();
       for (const meta of included) {
-        const got = await store.getFile(user, meta.id);
+        const got = await persistence.readFileBytes(user, meta.id);
         if (!got) continue;
         const clean = (meta.name || "archivo").replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 80);
         let entryName = `archivos/${meta.id}_${clean}`;
         let n = 1;
         while (usedNames.has(entryName)) entryName = `archivos/${meta.id}_${n++}_${clean}`;
         usedNames.add(entryName);
-        entries.push({ name: entryName, bytes: got.bytes });
+        entries.push({ name: entryName, bytes: got });
       }
 
       const zip = buildZip(entries);
+      await audit(user, { action: "expediente.export", ok: true, detail: `ZIP con ${included.length} documentos` });
       res.setHeader("content-type", "application/zip");
       res.setHeader(
         "content-disposition",
@@ -277,12 +638,16 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
-  // ---------- copias de seguridad ----------
+  // ---------- copias de seguridad y auditoría ----------
   router.post("/backups", requireAuth, async (req: Request, res, next) => {
     try {
+      const user = (req as any).vaultUser;
       const portfolio = req.body?.portfolio;
       if (portfolio == null) return badRequest(res, "Falta la cartera a copiar.");
-      const created = await store.createBackup((req as any).vaultUser, portfolio);
+      const createdAt = new Date().toISOString();
+      const id = safeSegment(req.body?.id) || `backup_${createdAt.replace(/[^0-9]/g, "")}`;
+      const created = await persistence.createBackup(user, id, portfolio);
+      await audit(user, { action: "backup.create", ok: true, target: created.id, detail: `${created.size} bytes` });
       res.status(201).json({ ok: true, ...created });
     } catch (err: any) {
       if (err instanceof Error && /límite/i.test(err.message)) return badRequest(res, err.message);
@@ -292,8 +657,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   router.get("/backups", requireAuth, async (req: Request, res, next) => {
     try {
-      const backups = await store.listBackups((req as any).vaultUser);
-      res.json({ ok: true, backups });
+      res.json({ ok: true, backups: await persistence.listBackups((req as any).vaultUser) });
     } catch (err) {
       next(err);
     }
@@ -301,7 +665,7 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
 
   router.get("/backups/:id", requireAuth, async (req: Request, res, next) => {
     try {
-      const portfolio = await store.getBackup((req as any).vaultUser, req.params.id);
+      const portfolio = await persistence.getBackup((req as any).vaultUser, req.params.id);
       if (portfolio == null) {
         res.status(404).json({ ok: false, error: "La copia no existe para esta cuenta." });
         return;
@@ -312,5 +676,75 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
     }
   });
 
+  /** Trazabilidad de las operaciones relevantes de la propia cuenta. */
+  router.get("/audit", requireAuth, async (req: Request, res, next) => {
+    try {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+      res.json({ ok: true, events: await persistence.listAudit((req as any).vaultUser, limit) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
+}
+
+/** Metadatos que SÍ pueden salir al cliente (nunca la ruta interna del objeto). */
+export function publicFileMeta(meta: VaultFileMeta): Omit<VaultFileMeta, "blobPathname"> {
+  const { blobPathname: _omit, ...rest } = meta;
+  return rest;
+}
+
+/**
+ * Guarda un archivo nuevo: valida, comprueba idempotencia por hash y NO escribe metadatos
+ * hasta que el contenido está en el almacén remoto.
+ */
+export async function storeNewFile(
+  persistence: VaultPersistence,
+  opts: {
+    username: string;
+    id?: string;
+    name: string;
+    contentType: string;
+    bytes: Uint8Array;
+    movementId?: string;
+    propertyId?: string;
+  }
+): Promise<VaultFileMeta> {
+  if (opts.bytes.length > VAULT_MAX_FILE_BYTES) throw new Error("El archivo supera el límite de 10 MB del vault.");
+  const typeProblem = vaultContentTypeProblem(opts.contentType);
+  if (typeProblem) throw new Error(typeProblem);
+
+  const id = opts.id ? safeSegment(opts.id) : vaultFileId();
+  if (!id) throw new Error("Identificador de archivo no válido.");
+  const sha = sha256Hex(opts.bytes);
+
+  const existing = await persistence.getFileMeta(opts.username, id);
+  if (existing) {
+    // Idempotencia: reintentar la misma subida reutiliza el objeto ya verificado.
+    if (existing.sha256 === sha && existing.size === opts.bytes.length) return existing;
+    throw new Error("Ya existe un archivo distinto con ese identificador; no se sobrescribe.");
+  }
+
+  await persistence.writeFileBytes(opts.username, id, opts.bytes, opts.contentType);
+  const readBack = await persistence.readFileBytes(opts.username, id);
+  if (!readBack || sha256Hex(readBack) !== sha) {
+    throw new VaultStorageUnavailableError(
+      "El archivo no se ha podido confirmar en el almacenamiento remoto; la subida no se ha completado."
+    );
+  }
+
+  const meta: VaultFileMeta = {
+    id,
+    name: String(opts.name || "archivo").slice(0, 200),
+    contentType: opts.contentType,
+    size: opts.bytes.length,
+    sha256: sha,
+    createdAt: new Date().toISOString(),
+    sha256VerifiedBy: "server",
+  };
+  if (opts.movementId) meta.movementId = String(opts.movementId).slice(0, 128);
+  if (opts.propertyId) meta.propertyId = String(opts.propertyId).slice(0, 128);
+  await persistence.putFileMeta(opts.username, meta);
+  return meta;
 }

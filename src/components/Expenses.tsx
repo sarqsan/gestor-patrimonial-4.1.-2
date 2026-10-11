@@ -235,12 +235,6 @@ export default function Expenses({
         movementId: expenseId,
       });
       onUpdateExpenseReceipt(expenseId, expenseReceiptFieldsFromStored(stored));
-      if (stored.mode === "local-inline") {
-        alert(
-          "El almacenamiento remoto no está disponible ahora mismo: el comprobante queda en la COLA LOCAL de este " +
-          "navegador y se enviará al almacenamiento remoto en cuanto vuelva a estar disponible."
-        );
-      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "No se pudo subir el comprobante.");
     }

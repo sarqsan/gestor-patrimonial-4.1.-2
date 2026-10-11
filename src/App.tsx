@@ -33,6 +33,11 @@ import {
   setActiveVaultUser,
   flushQueuedReceiptsToVault,
 } from "./lib/vaultClient";
+import {
+  clearPortfolioSyncCache,
+  loadPortfolioEntities,
+  syncPortfolioEntities,
+} from "./lib/portfolioRemote";
 import { AlertTriangle, RotateCw, Loader2 } from "lucide-react";
 import { 
   Menu, 
@@ -145,7 +150,10 @@ export default function App() {
   // cambios locales (localChangeRef). Los datos recibidos de la nube nunca se reescriben.
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: "idle" });
   const localChangeRef = useRef(false);
-  const dirtyRef = useRef(false); // hay cambios locales aún no confirmados por Firestore
+  const dirtyRef = useRef(false); // hay cambios locales aún no confirmados por el guardado remoto
+  // La cartera ya se ha hidratado desde el almacén remoto (fuente definitiva): el espejo
+  // legado de Firestore deja de aplicar cambios sobre el estado.
+  const vaultHydratedRef = useRef(false);
   const lastSavedJsonRef = useRef<string | null>(null);
   // Base64 históricos conocidos (ya en la nube o cargados de la copia local). Se toleran
   // mientras existan; cualquier Base64 NUEVO se rechaza antes de escribir.
@@ -179,42 +187,76 @@ export default function App() {
     const path = `users/${userId}/data/portfolio`;
     const userDocRef = doc(db, "users", userId, "data", "portfolio");
 
-    // Si Firestore no confirma la escritura (p. ej. sin conexión) no se muestra "Guardando…" para siempre.
+    // Si el destino no confirma la escritura no se muestra "Guardando…" para siempre.
     let settled = false;
     const slowTimer = setTimeout(() => {
       if (!settled && seq === writeSeqRef.current) {
         dirtyRef.current = true;
         setSaveStatus({
           kind: "error",
-          message: "La nube no ha confirmado el guardado tras 20 segundos (¿sin conexión?). Los cambios siguen en este navegador y Firestore seguirá intentando enviarlos.",
+          message: "El almacén remoto no ha confirmado el guardado tras 20 segundos (¿sin conexión?). Los cambios siguen en este navegador y se reintentarán.",
           at: Date.now(),
         });
       }
     }, 20000);
 
-    setDoc(userDocRef, { ...body, updatedAt: new Date().toISOString() }, { merge: true })
-      .then(() => {
-        settled = true;
-        clearTimeout(slowTimer);
-        if (seq > lastOkSeqRef.current) {
-          lastOkSeqRef.current = seq;
-          lastSavedJsonRef.current = json;
-          // Los Base64 de esta escritura ya están en la nube: pasan a ser conocidos.
-          for (const v of legacyDataUrlSet(body)) legacyBaselineRef.current.add(v);
-        }
-        if (seq === writeSeqRef.current) {
-          dirtyRef.current = false;
-          setSaveStatus({ kind: "saved", at: Date.now() });
-        }
-      })
+    const confirmSaved = () => {
+      settled = true;
+      clearTimeout(slowTimer);
+      if (seq > lastOkSeqRef.current) {
+        lastOkSeqRef.current = seq;
+        lastSavedJsonRef.current = json;
+        // Los Base64 de esta escritura ya están en la nube: pasan a ser conocidos.
+        for (const v of legacyDataUrlSet(body)) legacyBaselineRef.current.add(v);
+      }
+      if (seq === writeSeqRef.current) {
+        dirtyRef.current = false;
+        setSaveStatus({ kind: "saved", at: Date.now() });
+      }
+    };
+    const confirmFailed = (message: string) => {
+      settled = true;
+      clearTimeout(slowTimer);
+      dirtyRef.current = true;
+      if (seq === writeSeqRef.current) {
+        setSaveStatus({ kind: "error", message, at: Date.now() });
+      }
+    };
+
+    // Única escritura en Firestore (espejo legado / modo degradado): ver
+    // docs/matriz-entidades-patrimoniales.md. El guardado DEFINITIVO es el almacén remoto.
+    const legacyFirestoreWrite = () =>
+      setDoc(userDocRef, { ...body, updatedAt: new Date().toISOString() }, { merge: true });
+
+    // ---- ALMACÉN REMOTO PROPIO (definitivo): entidades patrimoniales + movimientos ----
+    // La promesa solo se resuelve cuando el almacén ha CONFIRMADO la escritura. No hay
+    // guardado local silencioso ni éxito falso: si falla, el estado queda pendiente.
+    if (getVaultToken(userId)) {
+      syncPortfolioEntities(userId, body)
+        .then(() => vaultPutMovements(userId, (body.expenses ?? []) as PropertyExpense[]))
+        .then(() => {
+          confirmSaved();
+          // Espejo LEGADO best-effort: nunca bloquea ni decide el éxito (el remoto ya confirmó).
+          legacyFirestoreWrite().catch((err) => {
+            console.warn("[legacy] Espejo de Firestore fallido (el almacén remoto ya confirmó el guardado):", err);
+          });
+        })
+        .catch((err) => {
+          console.error("[vault] El almacén remoto no ha confirmado el guardado:", err);
+          const message = err instanceof Error && err.message
+            ? err.message
+            : "El almacén remoto no ha confirmado el guardado. Los cambios siguen en este navegador.";
+          confirmFailed(message);
+        });
+      return;
+    }
+
+    // ---- LEGADO (sin sesión del almacén remoto): Firestore, modo degradado declarado ----
+    legacyFirestoreWrite()
+      .then(confirmSaved)
       .catch((err) => {
-        settled = true;
-        clearTimeout(slowTimer);
-        dirtyRef.current = true;
         handleFirestoreError(err, OperationType.WRITE, path);
-        if (seq === writeSeqRef.current) {
-          setSaveStatus({ kind: "error", message: describePersistenceError(err), at: Date.now() });
-        }
+        confirmFailed(describePersistenceError(err));
       });
   };
 
@@ -345,10 +387,11 @@ export default function App() {
     const path = `users/${state.currentUser}/data/portfolio`;
     const userDocRef = doc(db, "users", state.currentUser, "data", "portfolio");
 
-    // Initial fetch from Firestore
+    // Initial fetch from Firestore (LEGADO: solo aplica si el almacén remoto aún no hidrató)
     getDoc(userDocRef)
       .then((snapshot) => {
         if (dirtyRef.current) return; // cambios locales pendientes: no sobrescribir con la nube
+        if (vaultHydratedRef.current) return; // el almacén remoto es la fuente definitiva
         if (snapshot.exists()) {
           const cloudData = snapshot.data();
           for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
@@ -389,6 +432,7 @@ export default function App() {
       (docSnap) => {
         // Si hay cambios locales sin confirmar, no los reemplazamos silenciosamente por la nube.
         if (dirtyRef.current) return;
+        if (vaultHydratedRef.current) return; // el almacén remoto es la fuente definitiva
         if (docSnap.exists()) {
           const cloudData = docSnap.data();
           for (const v of legacyDataUrlSet(cloudData)) legacyBaselineRef.current.add(v);
@@ -1103,9 +1147,11 @@ export default function App() {
     const localMovements: PropertyExpense[] = loadedState.expenses ?? [];
     vaultEnsureSession(username, password)
       .then(async () => {
+        let mergedMovementsForSeed: PropertyExpense[] = localMovements;
         try {
           const remote = (await vaultGetMovements(username)) as PropertyExpense[];
           const merged = reconcileMovements(localMovements, remote);
+          mergedMovementsForSeed = merged;
           // Externaliza al vault los comprobantes que quedaron en la COLA LOCAL (recibos
           // Base64 guardados cuando el remoto no estaba disponible). Mejor esfuerzo.
           try {
@@ -1120,6 +1166,39 @@ export default function App() {
           await vaultPutMovements(username, merged);
         } catch (err) {
           console.warn("[vault] Sincronización de movimientos en el login no completada:", err);
+        }
+
+        // Entidades patrimoniales (titulares, inmuebles, contratos, recibos, ajustes):
+        // el almacén remoto es la FUENTE DEFINITIVA. Si ya hay estado remoto, se hidrata desde
+        // él; si no (cuenta nueva o primera migración desde el legado), se siembra con el
+        // estado actual.
+        try {
+          const remoteBody = await loadPortfolioEntities(username);
+          if (remoteBody) {
+            vaultHydratedRef.current = true;
+            setState((prev) => {
+              if (prev.currentUser !== username) return prev;
+              return {
+                ...prev,
+                user1: (remoteBody.user1 as AppState["user1"]) || prev.user1,
+                user2: (remoteBody.user2 as AppState["user2"]) || prev.user2,
+                properties: mergePropertiesOnHydration(remoteBody.properties as Property[], prev.properties),
+                payments: (remoteBody.payments as RentPayment[]) ?? prev.payments,
+                contracts: (remoteBody.contracts as any[]) ?? prev.contracts,
+                syncEvents: (remoteBody.syncEvents as SyncEvent[]) ?? prev.syncEvents,
+                yearlyProfiles: (remoteBody.yearlyProfiles as AppState["yearlyProfiles"]) ?? prev.yearlyProfiles,
+                currentYear: (remoteBody.currentYear as number) ?? prev.currentYear,
+                isOnboarded: (remoteBody.isOnboarded as boolean) ?? prev.isOnboarded,
+                theme: (remoteBody.theme as string) ?? prev.theme,
+              };
+            });
+          } else {
+            const seed = { ...loadedState, expenses: mergedMovementsForSeed };
+            await syncPortfolioEntities(username, portfolioBody(seed));
+            console.log("[vault] Cartera sembrada en el almacén remoto (primera sincronización).");
+          }
+        } catch (err) {
+          console.warn("[vault] Hidratación de entidades no completada:", err);
         }
       })
       .catch((err) => {
@@ -1146,6 +1225,8 @@ export default function App() {
       // Cierre de la sesión del almacenamiento remoto (el token guardado se retira).
       clearVaultToken(state.currentUser);
       setActiveVaultUser(null);
+      clearPortfolioSyncCache(state.currentUser);
+      vaultHydratedRef.current = false;
     }
     
     // Clear session in localStorage

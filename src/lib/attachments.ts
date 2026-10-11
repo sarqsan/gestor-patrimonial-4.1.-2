@@ -2,7 +2,7 @@
 // New attachments are stored in Storage and referenced from Firestore by storagePath only.
 // Legacy attachments (data: URLs stored inside the portfolio document) keep working unchanged.
 import { ref, uploadBytes, getDownloadURL, getBlob, getBytes as getStorageBytes } from "firebase/storage";
-import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError } from "./firebase";
+import { storage, authReady, auth, ensureFirebaseAuth, describeAuthError, isAdministrativeAuthError, isTransientNetworkAuthError } from "./firebase";
 import {
   AttachmentFolder,
   attachmentStoragePath,
@@ -14,21 +14,16 @@ import {
 } from "./attachmentRules";
 import { ObjectConflictError, storeVerifiedObject, VerifiedObjectPort } from "./verifiedObjectStore";
 import {
-  LOCAL_INLINE_MAX_RAW_BYTES,
-  blobToDataUrl,
-  dataUrlApproxChars,
-  estimateLocalFreeChars,
-  localInlineBudgetProblem,
-  localInlineCapacityProblem,
-  maybeDownscaleImage,
-} from "./localVault";
-import {
   VaultAuthError,
   VaultError,
+  VaultUnavailableError,
   getActiveVaultUser,
   getVaultToken,
+  invalidateVaultCapabilities,
+  vaultCapabilities,
   vaultDownloadFile,
-  vaultUploadFile,
+  vaultUnavailableMessage,
+  vaultUploadFileAuto,
 } from "./vaultClient";
 import type { PropertyExpense } from "../types";
 
@@ -95,15 +90,15 @@ export interface StoredAttachment {
   storagePath?: string;
   /** Referencia al vault, el almacenamiento remoto propio (solo en modo "vault"). */
   vaultId?: string;
-  /** Data URL en la copia local del usuario (solo en modo "local-inline": cola temporal). */
-  inlineData?: string;
   /**
-   * "vault": almacenamiento remoto persistente propio (destino definitivo actual).
-   * "storage": Firebase Storage (si el proyecto Firebase vuelve a dar sesión).
-   * "local-inline": cola local temporal por indisponibilidad del almacenamiento remoto;
-   *   se sincronizará con el destino remoto en cuanto esté disponible.
+   * "vault": almacenamiento remoto persistente propio (destino definitivo).
+   *   En producción es un almacén Blob PRIVADO de Vercel; el navegador nunca recibe su URL.
+   * "storage": Firebase Storage (solo si el proyecto Firebase vuelve a autorizar la sesión).
+   *
+   * No existe un modo "local": el navegador no es un destino de almacenamiento definitivo
+   * y una subida que no llega al almacén remoto NO se declara completada.
    */
-  mode: "vault" | "storage" | "local-inline";
+  mode: "vault" | "storage";
   name: string;
   contentType: string;
   size: number;
@@ -124,70 +119,12 @@ export function expenseReceiptFieldsFromStored(stored: StoredAttachment): Partia
       receiptUrl: undefined,
     };
   }
-  if (stored.mode === "local-inline") {
-    return {
-      receiptUrl: stored.inlineData,
-      receiptName: stored.name,
-      receiptType: stored.contentType,
-      receiptPath: undefined,
-      receiptVaultId: undefined,
-    };
-  }
   return {
     receiptPath: stored.storagePath,
     receiptName: stored.name,
     receiptType: stored.contentType,
     receiptUrl: undefined,
     receiptVaultId: undefined,
-  };
-}
-
-/**
- * Vía de contingencia SOLO ante bloqueo administrativo (auth/admin-restricted-operation):
- * guarda el adjunto como data URL (formato legado) para la copia local del usuario.
- * No escribe en Firebase, no cambia reglas ni rutas de Storage, no reasigna nada.
- *
- * Antifalso-éxito: antes de confirmar, comprueba presupuesto por archivo Y capacidad
- * real de localStorage. Si no cabe, lanza un error claro y el archivo NO se da por guardado.
- */
-async function storeLocalInlineFallback(file: File): Promise<StoredAttachment> {
-  let candidate: Blob = file;
-  let contentType = resolveContentType(file.name, file.type);
-
-  // Imágenes por encima del presupuesto: intentar reducción en el navegador.
-  if (file.size > LOCAL_INLINE_MAX_RAW_BYTES && contentType.startsWith("image/")) {
-    const downscaled = await maybeDownscaleImage(file, LOCAL_INLINE_MAX_RAW_BYTES);
-    if (downscaled) {
-      candidate = downscaled;
-      contentType = downscaled.type || "image/jpeg";
-    }
-  }
-
-  const problem = localInlineBudgetProblem({ size: candidate.size });
-  if (problem) {
-    throw new AdminRestrictedAttachmentError(
-      `Firebase Auth está bloqueado por administración y el archivo no cabe en la vía local: ${problem}`
-    );
-  }
-
-  // Capacidad real del almacenamiento local: no confirmar un guardado que el navegador rechazará.
-  const capacityProblem = localInlineCapacityProblem({
-    dataUrlChars: dataUrlApproxChars(candidate.size),
-    freeChars: estimateLocalFreeChars(),
-  });
-  if (capacityProblem) {
-    throw new AdminRestrictedAttachmentError(
-      `Firebase Auth está bloqueado por administración y ${capacityProblem}`
-    );
-  }
-
-  const inlineData = await blobToDataUrl(candidate, contentType);
-  return {
-    mode: "local-inline",
-    inlineData,
-    name: file.name,
-    contentType,
-    size: candidate.size,
   };
 }
 
@@ -216,6 +153,49 @@ export function describeStorageError(err: unknown): string {
  * Sube un adjunto nuevo a users/{usuario}/attachments/{carpeta}/{id}/{nombre}.
  * Lanza AttachmentError con un mensaje visible si la validación o la subida fallan.
  */
+/**
+ * ¿Firebase Storage es realmente utilizable ahora mismo? Comprueba la sesión y, ante un
+ * rechazo administrativo del proyecto (auth/admin-restricted-operation), informa en lugar de
+ * degradar a un almacenamiento local que no es persistente. La sesión se memoiza: si ya está
+ * activa no se repite la comprobación en cada subida.
+ */
+interface FirebaseProbe {
+  usable: boolean;
+  /** Motivo técnico del fallo (incluye el código del servicio cuando existe). */
+  reason?: string;
+  /** `true` si el fallo es transitorio (red): no se memoriza y se reintenta. */
+  transient?: boolean;
+}
+
+let firebaseProbe: Promise<FirebaseProbe> | null = null;
+function ensureFirebaseProbe(): Promise<FirebaseProbe> {
+  if (!firebaseProbe) {
+    const probe = checkFirebaseStorageUsable();
+    firebaseProbe = probe;
+    // Un fallo transitorio (red) NO se memoriza: el siguiente intento debe poder volver a probar.
+    probe.then((result) => {
+      if (!result.usable && result.transient) firebaseProbe = null;
+    });
+  }
+  return firebaseProbe;
+}
+async function checkFirebaseStorageUsable(): Promise<FirebaseProbe> {
+  try {
+    await ensureSignedIn();
+    return { usable: true };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn("[attachments] Firebase Storage no utilizable:", reason);
+    // Un bloqueo administrativo no se resuelve reintentando; una caída de red sí.
+    return { usable: false, reason, transient: isTransientNetworkAuthError(err) };
+  }
+}
+
+/** Reintenta la comprobación de Firebase (tras un fallo transitorio, por ejemplo). */
+export function invalidateFirebaseStorageProbe(): void {
+  firebaseProbe = null;
+}
+
 export async function uploadAttachment(opts: {
   userId: string;
   folder: AttachmentFolder;
@@ -238,44 +218,56 @@ export async function uploadAttachment(opts: {
   // usuario, el archivo viaja al backend de la aplicación y queda disponible entre
   // sesiones y dispositivos.
   if (getVaultToken(opts.userId)) {
+    let capabilities: Awaited<ReturnType<typeof vaultCapabilities>> | null = null;
     try {
-      const bytes = new Uint8Array(await opts.file.arrayBuffer());
-      const meta = await withTimeout(
-        vaultUploadFile({
-          username: opts.userId,
-          bytes,
-          name: opts.file.name,
-          contentType,
-          movementId: opts.movementId,
-          propertyId: opts.propertyId,
-        }),
-        UPLOAD_TIMEOUT_MS,
-        "La subida al almacenamiento remoto ha superado el tiempo de espera. El archivo no se ha guardado; inténtalo de nuevo."
-      );
-      return { mode: "vault", vaultId: meta.id, name: opts.file.name, contentType, size: meta.size };
+      capabilities = await vaultCapabilities();
+      if (capabilities.storageOk) {
+        const meta = await withTimeout(
+          vaultUploadFileAuto({
+            username: opts.userId,
+            file: opts.file,
+            name: opts.file.name,
+            contentType,
+            movementId: opts.movementId,
+            propertyId: opts.propertyId,
+            capabilities,
+          }),
+          UPLOAD_TIMEOUT_MS,
+          "La subida al almacenamiento remoto ha superado el tiempo de espera. El archivo no se ha guardado; inténtalo de nuevo."
+        );
+        return { mode: "vault", vaultId: meta.id, name: opts.file.name, contentType, size: meta.size };
+      }
     } catch (err) {
-      // Sesión inválida o rechazo del vault: degradar a Firebase y, en último término,
-      // a la cola local. Nunca se declara éxito sin confirmación del destino remoto.
       if (!(err instanceof VaultAuthError || err instanceof VaultError || err instanceof AttachmentError)) {
         throw err instanceof Error ? err : new AttachmentError(String(err));
       }
-      console.warn("[attachments] Vault no disponible para la subida; se intenta Firebase:", err);
+      // El almacén remoto no está disponible: se registra el motivo real y NO se sustituye
+      // por almacenamiento del navegador. Se intenta Firebase y, si tampoco, error explícito.
+      console.warn("[attachments] Almacenamiento remoto no disponible en esta subida:", err);
+      invalidateVaultCapabilities();
+    }
+    // Con el almacén remoto inutilizable no se simula un guardado local: se informa y se para.
+    const probe = await ensureFirebaseProbe();
+    if (!probe.usable) {
+      throw new AttachmentError(
+        `${vaultUnavailableMessage(capabilities)}${probe.reason ? ` Firebase Storage tampoco está disponible: ${probe.reason}` : ""}`
+      );
+    }
+  } else {
+    // Sesión remota aún no establecida (p. ej. acceso anterior a esta función): se intenta
+    // Firebase y, si no está disponible, se explica el motivo real y qué hacer.
+    const probe = await ensureFirebaseProbe();
+    if (!probe.usable) {
+      throw new AttachmentError(
+        "El almacenamiento remoto de la aplicación no está activo en esta sesión: cierra sesión y vuelve " +
+          "a entrar para activarlo." +
+          (probe.reason ? ` Motivo: ${probe.reason}` : "") +
+          " El archivo no se ha guardado."
+      );
     }
   }
 
-  // ---- 2) FIREBASE STORAGE: si el proyecto Firebase vuelve a autorizar la sesión. ----
-  try {
-    await ensureSignedIn();
-  } catch (err) {
-    // Contingencia SOLO ante rechazo administrativo del proyecto Firebase: comprobantes
-    // de gastos y documentos de inmueble quedan en la COLA LOCAL (data URL) a la espera de
-    // sincronizarse con el destino remoto. Los contratos no tienen campo legado equivalente
-    // y las subidas verificadas (importaciones/migración) mantienen su comportamiento estricto.
-    if (err instanceof AdminRestrictedAttachmentError && opts.folder !== "contracts") {
-      return storeLocalInlineFallback(opts.file);
-    }
-    throw err;
-  }
+  // ---- 2) FIREBASE STORAGE: solo si el proyecto Firebase autoriza la sesión. ----
 
   const attachmentId = opts.attachmentId ?? newAttachmentId("att");
   const storagePath = attachmentStoragePath(opts.userId, opts.folder, attachmentId, opts.file.name);
