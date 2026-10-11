@@ -79,7 +79,7 @@ test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase n
   const calls: Array<{ url: string; init?: any }> = [];
   (globalThis as any).fetch = async (url: string, init?: any) => {
     calls.push({ url, init });
-    if (url === "/api/vault/health") {
+    if (url === "/api/vault?op=health") {
       return {
         ok: true,
         status: 200,
@@ -109,8 +109,8 @@ test("A4. uploadAttachment usa el vault cuando hay sesión (sin tocar Firebase n
   assert.equal(stored.storagePath, undefined);
   // Red: sonda de capacidades + subida. Firebase Storage no se invoca en ningún caso.
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].url, "/api/vault/health");
-  assert.equal(calls[1].url, "/api/vault/files");
+  assert.equal(calls[0].url, "/api/vault?op=health");
+  assert.equal(calls[1].url, "/api/vault?op=files.upload");
   const body = JSON.parse(calls[1].init.body);
   assert.equal(body.movementId, "exp_1");
   assert.equal(body.propertyId, "prop_1");
@@ -124,7 +124,7 @@ test("A5. getAttachmentBlob resuelve por referencia vault con el usuario activo"
   setActiveVaultUser("alice");
   let authHeader: string | undefined;
   (globalThis as any).fetch = async (url: string, init?: any) => {
-    assert.equal(url, "/api/vault/files/file_77");
+    assert.equal(url, "/api/vault?op=files.get&id=file_77");
     authHeader = init?.headers?.authorization;
     return {
       ok: true,

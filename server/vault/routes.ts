@@ -1,6 +1,15 @@
 // Rutas HTTP del vault. Se montan en /api/vault dentro de la aplicación Express existente
 // (server/apiApp.ts), compartida por Vercel (api/[...route].ts) y el servidor local (server.ts).
 //
+// Enrutado compatible con Vercel:
+//  - En Vercel, las rutas ANIDADAS (/api/vault/files/:id, ...) devolvían un 404 de la propia
+//    plataforma ANTES de alcanzar Express. La forma que siempre llega al router es la de UN
+//    solo segmento de ruta con la operación en la consulta: `/api/vault?op=<operación>[&id=…]`.
+//  - Este router incluye la capa de compatibilidad que TRADUCE `?op=` a la ruta interna
+//    equivalente (misma petición, mismos controles de autenticación y autorización). La forma
+//    anidada clásica sigue funcionando donde sí alcanza Express (local/Render): nada del
+//    montaje existente cambia.
+//
 // Seguridad:
 //  - Todas las operaciones de datos exigen token de sesión (Bearer). Los recursos se resuelven
 //    SIEMPRE bajo el directorio del usuario del token: no existe ruta que permita leer o
@@ -46,6 +55,77 @@ export function vaultContentTypeProblem(contentType: string): string | null {
 
 export function vaultFileId(): string {
   return `file_${Date.now()}_${Math.floor(Math.random() * 1e12).toString(36)}`;
+}
+
+// ---------- capa de compatibilidad de enrutado (`?op=`) ----------
+
+type VaultOpSpec = {
+  /** Métodos HTTP admitidos para la operación. */
+  methods: string[];
+  /** Ruta interna del router; con `id`, plantilla que lo recibe ya validado. */
+  path: string | ((id: string) => string);
+  /** La operación necesita `id` en la consulta. */
+  requiresId?: boolean;
+};
+
+/**
+ * Operaciones de la forma compatible `/api/vault?op=<operación>[&id=…]`. Cada una se traduce a
+ * la ruta interna equivalente; los nombres explícitos (`files.get`, `files.delete`, ...) y los
+ * nombres cortos por recurso+Método (`files`, `backups`, `movimientos`) son equivalentes.
+ */
+export const VAULT_OPERATION_SPECS: Record<string, VaultOpSpec> = {
+  health: { methods: ["GET"], path: "/health" },
+  "auth.register": { methods: ["POST"], path: "/auth/register" },
+  "auth.login": { methods: ["POST"], path: "/auth/login" },
+  session: { methods: ["GET"], path: "/session" },
+  movimientos: { methods: ["GET", "PUT"], path: "/movimientos" },
+  files: { methods: ["GET", "POST"], path: "/files" },
+  "files.list": { methods: ["GET"], path: "/files" },
+  "files.upload": { methods: ["POST"], path: "/files" },
+  "files.presign": { methods: ["POST"], path: "/files/presign" },
+  "files.commit": { methods: ["POST"], path: (id) => `/files/${id}/commit`, requiresId: true },
+  "files.get": { methods: ["GET"], path: (id) => `/files/${id}`, requiresId: true },
+  "files.delete": { methods: ["DELETE"], path: (id) => `/files/${id}`, requiresId: true },
+  expediente: { methods: ["GET"], path: "/expediente" },
+  "expediente.zip": { methods: ["GET"], path: "/expediente.zip" },
+  backups: { methods: ["GET", "POST"], path: "/backups" },
+  "backups.list": { methods: ["GET"], path: "/backups" },
+  "backups.create": { methods: ["POST"], path: "/backups" },
+  "backups.get": { methods: ["GET"], path: (id) => `/backups/${id}`, requiresId: true },
+  audit: { methods: ["GET"], path: "/audit" },
+};
+
+export type VaultOpResolution = { path: string } | { status: number; error: string };
+
+/**
+ * Resuelve `?op=<operación>[&id=…]` a la ruta interna del router, o a un error explícito.
+ * No hay silencio: operación desconocida, método no admitido o identificador ausente/manipulado
+ * se rechazan con un mensaje claro (nunca se degradan a un 404 genérico de plataforma).
+ */
+export function resolveVaultOperation(op: string, method: string, id: string): VaultOpResolution {
+  const spec = VAULT_OPERATION_SPECS[op];
+  const httpMethod = method.toUpperCase() === "HEAD" ? "GET" : method.toUpperCase();
+  if (!spec) {
+    return {
+      status: 400,
+      error: `Operación no admitida en el almacén remoto (${op}). Usa /api/vault?op=<operación>[&id=…].`,
+    };
+  }
+  if (!spec.methods.includes(httpMethod)) {
+    return {
+      status: 405,
+      error: `La operación ${op} no admite el método ${httpMethod} (admitidos: ${spec.methods.join(", ")}).`,
+    };
+  }
+  if (typeof spec.path === "string") return { path: spec.path };
+  const clean = safeSegment(id);
+  if (!clean) {
+    return {
+      status: 400,
+      error: `La operación ${op} necesita un identificador válido (?id=…: letras, números, guiones).`,
+    };
+  }
+  return { path: spec.path(encodeURIComponent(clean)) };
 }
 
 /** Extrae y valida el usuario del token Bearer. */
@@ -105,6 +185,47 @@ export function createVaultRouter(options: VaultRouterOptions): Router {
       next(err);
     }
   };
+
+  // ---------- traducción de la forma compatible (?op=) ----------
+  // Debe registrarse ANTES que ninguna ruta: traduce `/api/vault?op=…&id=…` a la ruta interna
+  // equivalente y continúa el despacho normal del router (mismos middlewares y controles).
+  router.use((req: Request, res: Response, next: NextFunction) => {
+    try {
+      const opValue = req.query.op;
+      if (opValue === undefined) return next(); // forma anidada clásica: sin traducción
+      // La forma compatible es de un solo segmento: no se admite combinarla con una ruta anidada.
+      const residual = (req.url.split("?")[0] || "/").replace(/\/+$/, "") || "/";
+      if (residual !== "/") {
+        return res.status(400).json({
+          ok: false,
+          error: "Usa /api/vault?op=<operación>[&id=…] (sin ruta anidada) o la ruta anidada clásica, no ambas.",
+        });
+      }
+      if (typeof opValue !== "string") {
+        return res.status(400).json({ ok: false, error: "Indica una única operación (?op=…)." });
+      }
+      const idValue = req.query.id;
+      if (idValue !== undefined && typeof idValue !== "string") {
+        return res.status(400).json({ ok: false, error: "Indica un único identificador (?id=…)." });
+      }
+      const resolved = resolveVaultOperation(opValue, req.method, typeof idValue === "string" ? idValue : "");
+      if ("error" in resolved) {
+        return res.status(resolved.status).json({ ok: false, error: resolved.error });
+      }
+      // El resto de la consulta (from, to, limit…) se conserva; op e id ya van en la ruta.
+      const rest = new URLSearchParams();
+      for (const key of Object.keys(req.query)) {
+        if (key === "op" || key === "id") continue;
+        const value = (req.query as Record<string, unknown>)[key];
+        if (typeof value === "string") rest.set(key, value);
+      }
+      const qs = rest.toString();
+      req.url = resolved.path + (qs ? `?${qs}` : "");
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // ---------- abiertos ----------
 

@@ -77,7 +77,7 @@ test("C2. Sin destino remoto conectado, la subida falla y no se guarda nada en e
   storeVaultToken("ana", "tok-ana");
   const posts: string[] = [];
   (globalThis as any).fetch = async (url: string, init?: any) => {
-    if (url === "/api/vault/health") {
+    if (url === "/api/vault?op=health") {
       return jsonResponse(200, { ...HEALTH_OK, storageOk: false, durable: false, driver: "unconfigured", detail: "sin almacén conectado" });
     }
     posts.push(`${init?.method ?? "GET"} ${url}`);
@@ -102,7 +102,7 @@ test("C3. Almacén remoto caído (sin respuesta): error explícito y ninguna esc
   const storage = installLocalStorage();
   storeVaultToken("ana", "tok-ana");
   (globalThis as any).fetch = async (url: string) => {
-    if (url === "/api/vault/health") throw new Error("red caída (sintético)");
+    if (url === "/api/vault?op=health") throw new Error("red caída (sintético)");
     return jsonResponse(200, { file: { id: "x", name: "x", contentType: "application/pdf", size: 1, sha256: "h" } });
   };
   const file = new File([new Uint8Array([1, 2, 3])], "recibo.pdf", { type: "application/pdf" });
@@ -121,7 +121,7 @@ test("C4. La subida directa la usa el navegador solo con una firma acotada, y el
 
   (globalThis as any).fetch = async (url: string, init?: any) => {
     calls.push({ url, method: init?.method, body: init?.body ? String(init.body).slice(0, 120) : undefined });
-    if (url === "/api/vault/files/presign") {
+    if (url === "/api/vault?op=files.presign") {
       return jsonResponse(201, {
         ok: true,
         fileId: "file_directo_1",
@@ -131,7 +131,7 @@ test("C4. La subida directa la usa el navegador solo con una firma acotada, y el
     if (String(url).startsWith("https://blob.invalid/")) {
       return { ok: true, status: 200, json: async () => ({}) };
     }
-    if (url === "/api/vault/files/file_directo_1/commit") {
+    if (url === "/api/vault?op=files.commit&id=file_directo_1") {
       return jsonResponse(200, { ok: true, file: { id: "file_directo_1", name: "grande.pdf", contentType: "application/pdf", size: 5, sha256: "abc" } });
     }
     throw new Error(`llamada inesperada: ${url}`);
@@ -140,9 +140,9 @@ test("C4. La subida directa la usa el navegador solo con una firma acotada, y el
   const meta = await vaultUploadFileDirect({ username: "ana", file: payload, name: "grande.pdf", contentType: "application/pdf", movementId: "mov_1" });
   assert.equal(meta.id, "file_directo_1");
   assert.equal(calls.length, 3, "firma → escritura directa en el almacén → confirmación");
-  assert.equal(calls[0].url, "/api/vault/files/presign");
+  assert.equal(calls[0].url, "/api/vault?op=files.presign");
   assert.ok(String(calls[1].url).startsWith("https://blob.invalid/"), "el contenido no atraviesa la función serverless");
-  assert.equal(calls[2].url, "/api/vault/files/file_directo_1/commit");
+  assert.equal(calls[2].url, "/api/vault?op=files.commit&id=file_directo_1");
   assert.match(String(calls[2].body), /"sha256":"[0-9a-f]+"/, "la confirmación incluye el hash calculado en el navegador");
   assert.ok(!JSON.stringify(calls).includes("BLOB_READ_WRITE_TOKEN"), "no se maneja ninguna credencial del almacén");
 });
@@ -152,14 +152,14 @@ test("C5. El transporte se elige por tamaño: pequeño por JSON, grande por subi
   const usedPaths: string[] = [];
   (globalThis as any).fetch = async (url: string, init?: any) => {
     usedPaths.push(url);
-    if (url === "/api/vault/files") {
+    if (url === "/api/vault?op=files.upload") {
       return jsonResponse(201, { ok: true, file: { id: "file_json", name: "p.pdf", contentType: "application/pdf", size: 4, sha256: "h" } });
     }
-    if (url === "/api/vault/files/presign") {
+    if (url === "/api/vault?op=files.presign") {
       return jsonResponse(201, { ok: true, fileId: "file_grande", upload: { url: "https://blob.invalid/x", headers: {}, validUntil: Date.now() + 600000 } });
     }
     if (String(url).startsWith("https://blob.invalid/")) return { ok: true, status: 200, json: async () => ({}) };
-    if (url === "/api/vault/files/file_grande/commit") {
+    if (url === "/api/vault?op=files.commit&id=file_grande") {
       return jsonResponse(200, { ok: true, file: { id: "file_grande", name: "g.pdf", contentType: "application/pdf", size: 4, sha256: "h" } });
     }
     throw new Error(`llamada inesperada: ${url}`);
@@ -173,14 +173,14 @@ test("C5. El transporte se elige por tamaño: pequeño por JSON, grande por subi
   const big = new File([new Uint8Array(DIRECT_UPLOAD_THRESHOLD_BYTES + 1)], "g.pdf", { type: "application/pdf" });
   const r2 = await vaultUploadFileAuto({ username: "ana", file: big, name: "g.pdf", contentType: "application/pdf", capabilities: caps });
   assert.equal(r2.id, "file_grande");
-  assert.ok(usedPaths.includes("/api/vault/files"), "el archivo pequeño usa la vía JSON");
-  assert.ok(usedPaths.includes("/api/vault/files/presign"), "el archivo grande usa la vía directa");
+  assert.ok(usedPaths.includes("/api/vault?op=files.upload"), "el archivo pequeño usa la vía JSON");
+  assert.ok(usedPaths.includes("/api/vault?op=files.presign"), "el archivo grande usa la vía directa");
 });
 
 test("C6. La firma caducada o rechazada por el almacén no se declara como guardado", async () => {
   storeVaultToken("ana", "tok-ana");
   (globalThis as any).fetch = async (url: string) => {
-    if (url === "/api/vault/files/presign") {
+    if (url === "/api/vault?op=files.presign") {
       return jsonResponse(201, { ok: true, fileId: "file_x", upload: { url: "https://blob.invalid/x", headers: {}, validUntil: Date.now() + 1000 } });
     }
     if (String(url).startsWith("https://blob.invalid/")) return { ok: false, status: 403, json: async () => ({}) };

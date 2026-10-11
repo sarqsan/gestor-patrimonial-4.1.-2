@@ -1,11 +1,11 @@
 # Persistencia del Gestor Patrimonial en Vercel (arquitectura, reinicialización e importación)
 
-Fecha: 2026-10-11 · Rama de trabajo: `arena/8d1e8838-gestor-patrimonial-4-1-2`
+Fecha: 2026-10-11 · Rama de trabajo: `arena/e65d6133-gestor-patrimonial-4-1-2` (continuación de `arena/8d1e8838-gestor-patrimonial-4-1-2`, PR #12)
 
 ## 1. Arquitectura implantada
 
 ```
-Navegador ──(mismo origen, /api/vault/*, sesión por usuario)──► Función serverless (api/[...route].ts)
+Navegador ──(mismo origen, /api/vault?op=…, sesión por usuario)──► Función serverless (api/[...route].ts)
                                                                  ├─ auth: registro/login (scrypt) + token HMAC
                                                                  ├─ datos estructurados (JSON por entidad)
                                                                  ├─ documentos: contenido binario + metadatos (SHA-256)
@@ -40,27 +40,67 @@ Decisiones clave:
 - **Integridad verificable**: el servidor calcula el SHA-256 al recibir el contenido, y también lo
   recomprueba **al servir** (un objeto alterado no se entrega: 502).
 - **Subidas grandes sin pasar por el límite de cuerpo de Vercel**: el servidor firma una subida
-  directa (`POST /api/vault/files/presign`) acotada a un objeto, un tipo, un tamaño y 10 minutos;
+  directa (`POST /api/vault?op=files.presign`) acotada a un objeto, un tipo, un tamaño y 10 minutos;
   el navegador escribe en el almacén privado y después el servidor descarga el objeto, recalcula el
-  hash y consolida los metadatos (`POST /api/vault/files/<id>/commit`). Si el hash no coincide, el
+  hash y consolida los metadatos (`POST /api/vault?op=files.commit&id=…`). Si el hash no coincide, el
   objeto se descarta y la subida no se declara completada.
 
 ### Rutas de la API
 
-| Método y ruta | Función |
+**Forma principal (compatible con Vercel): `MÉTODO /api/vault?op=<operación>[&id=…]`** — un solo
+segmento de ruta, con la operación y el identificador opcional en la consulta. Ver «Enrutado
+compatible con Vercel» más abajo.
+
+| Método y URL | Función |
 | --- | --- |
-| `GET /api/vault/health` | Estado del destino (`durable`, `driver`, `storageOk`, `directUpload`, `maxFileBytes`) |
-| `POST /api/vault/auth/register` · `POST /api/vault/auth/login` | Alta y acceso con las mismas credenciales de la aplicación |
-| `GET /api/vault/session` | Cuenta de la sesión |
-| `GET/PUT /api/vault/movimientos` | Lectura y sincronización idempotente de movimientos |
-| `POST /api/vault/files` · `POST /api/vault/files/presign` · `POST /api/vault/files/:id/commit` | Subida (cuerpo JSON o directa firmada) |
-| `GET/DELETE /api/vault/files/:id` | Descarga autenticada (con `x-vault-sha256`) y borrado |
-| `GET /api/vault/expediente` · `GET /api/vault/expediente.zip` | Expediente fiscal por fechas (JSON o ZIP único) |
-| `POST/GET /api/vault/backups` · `GET /api/vault/backups/:id` | Copias de la cartera |
-| `GET /api/vault/audit` | Trazabilidad de las operaciones de la propia cuenta |
+| `GET /api/vault?op=health` | Estado del destino (`durable`, `driver`, `storageOk`, `directUpload`, `maxFileBytes`) |
+| `POST /api/vault?op=auth.register` · `POST /api/vault?op=auth.login` | Alta y acceso con las mismas credenciales de la aplicación |
+| `GET /api/vault?op=session` | Cuenta de la sesión |
+| `GET/PUT /api/vault?op=movimientos` | Lectura y sincronización idempotente de movimientos |
+| `POST /api/vault?op=files.upload` · `POST /api/vault?op=files.presign` · `POST /api/vault?op=files.commit&id=…` | Subida (cuerpo JSON o directa firmada) |
+| `GET/DELETE /api/vault?op=files.get&id=…` · `GET /api/vault?op=files.list` | Listado, descarga autenticada (con `x-vault-sha256`) y borrado |
+| `GET /api/vault?op=expediente&from=…&to=…` · `GET /api/vault?op=expediente.zip` | Expediente fiscal por fechas (JSON o ZIP único) |
+| `POST/GET /api/vault?op=backups.create` · `GET /api/vault?op=backups.get&id=…` · `GET /api/vault?op=backups.list` | Copias de la cartera |
+| `GET /api/vault?op=audit&limit=…` | Trazabilidad de las operaciones de la propia cuenta |
+
+También se aceptan los nombres cortos por recurso y Método (`op=files`, `op=backups`,
+`op=movimientos`) y la **ruta anidada clásica** (`GET /api/vault/files/:id`, …) donde la petición
+sí alcanza Express (desarrollo local y Render): las dos formas son equivalentes y comparten los
+mismos controles.
 
 Todas las rutas de datos exigen `Authorization: Bearer <token>` y resuelven los recursos **siempre**
 bajo la carpeta de la cuenta del token.
+
+### Enrutado compatible con Vercel (hallazgo y solución)
+
+**Hallazgo.** En el despliegue de Vercel, las rutas **anidadas** del vault (`/api/vault/files/:id`,
+`/api/vault/auth/login`, …) devolvían un **404 de la propia plataforma antes de alcanzar Express**:
+la petición nunca llegaba al router ni a sus controles de autenticación. Cualquier operación que
+necesitara un segundo segmento de ruta quedaba inutilizada en producción aunque funcionara en
+local.
+
+**Solución.** La forma que en Vercel **siempre** alcanza la función y el router es la de un solo
+segmento de ruta con la operación en la consulta:
+
+```
+/api/vault?op=<operación>[&id=…]
+```
+
+- El cliente (`src/lib/vaultClient.ts`, `vaultOperationUrl`) usa esta forma para todas las
+  operaciones.
+- La **capa de compatibilidad vive dentro del router** (`server/vault/routes.ts`): traduce
+  `?op=<operación>[&id=…]` a la ruta interna equivalente y continúa el despacho normal, con los
+  **mismos middlewares y los mismos controles de autenticación y autorización** que la forma
+  anidada. El resto de la consulta (`from`, `to`, `limit`, …) se conserva.
+- La forma anidada clásica **sigue funcionando** donde sí alcanza Express: no se rompe el montaje
+  existente en `server/apiApp.ts`.
+- Los errores de la forma compatible son explícitos (JSON con `ok: false` y mensaje): operación
+  desconocida → 400, método no admitido → 405, identificador ausente o manipulado → 400, forma
+  mixta (ruta anidada + `op`) → 400. Nunca se degradan a un 404 genérico de plataforma.
+
+Verificación automatizada: `server/vault/routingCompatibility.test.ts` (R1–R7: llegada al router,
+equivalencia de formas, autenticación idéntica, aislamiento entre cuentas, errores explícitos,
+regresión del montaje Express y tabla de operaciones).
 
 ## 2. Configuración necesaria en Vercel
 
@@ -68,7 +108,7 @@ bajo la carpeta de la cuenta del token.
    Vercel inyecta `BLOB_READ_WRITE_TOKEN` en los entornos del proyecto (producción, previsualización
    y desarrollo). No hay que copiar el token al repositorio: **nunca** se versiona un secreto.
 2. **Nada más**: no se necesita volumen, ni `DATABASE_URL`, ni Render. El proyecto sigue en Vercel.
-3. Comprobación: `GET /api/vault/health` debe responder `{"driver":"vercel-blob","durable":true,"storageOk":true}`.
+3. Comprobación: `GET /api/vault?op=health` debe responder `{"driver":"vercel-blob","durable":true,"storageOk":true}`.
    La pestaña «Sincronización» de la aplicación muestra ese mismo estado en lenguaje llano.
 
 Si el almacén no está conectado, el backend funciona en modo degradado **declarado**: la interfaz
@@ -93,8 +133,8 @@ Procedimiento recomendado, en este orden:
 
 | Paso | Acción | Comprobación |
 | --- | --- | --- |
-| 1 | Confirmar el almacén correcto con `GET /api/vault/health` | `driver: vercel-blob`, `storageOk: true` |
-| 2 | Registrar la cuenta administradora desde la interfaz | `POST /auth/register` → 201; login → token |
+| 1 | Confirmar el almacén correcto con `GET /api/vault?op=health` | `driver: vercel-blob`, `storageOk: true` |
+| 2 | Registrar la cuenta administradora desde la interfaz | `POST /api/vault?op=auth.register` → 201; login → token |
 | 3 | Importar el expediente descargado (sección 4) | Recuentos de inmuebles/movimientos/documentos |
 | 4 | Descargar un justificante y abrir el expediente ZIP | SHA-256 del archivo descargado coincide |
 | 5 | Cerrar sesión y volver a entrar (o esperar un nuevo despliegue) | Los datos siguen ahí: eran del almacén |

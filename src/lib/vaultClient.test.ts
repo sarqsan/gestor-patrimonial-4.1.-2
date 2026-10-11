@@ -65,13 +65,13 @@ test.afterEach(() => {
 test("C1. Primer uso: login 401 → alta → re-login guarda el token y marca el usuario activo", async () => {
   let loginCalls = 0;
   const { calls } = installFetch((url: string) => {
-    if (url === "/api/vault/auth/login") {
+    if (url === "/api/vault?op=auth.login") {
       loginCalls++;
       return loginCalls === 1
         ? jsonResponse(401, { error: "credenciales inválidas" })
         : jsonResponse(200, { token: "tok-u" });
     }
-    if (url === "/api/vault/auth/register") return jsonResponse(201, { ok: true });
+    if (url === "/api/vault?op=auth.register") return jsonResponse(201, { ok: true });
     return jsonResponse(404, { error: "no encontrado" });
   });
 
@@ -81,8 +81,8 @@ test("C1. Primer uso: login 401 → alta → re-login guarda el token y marca el
   assert.equal(getActiveVaultUser(), "alice");
   assert.equal(loginCalls, 2);
   // El alta se hace con las credenciales de la app (cuerpo username/password).
-  const register = calls.find((c) => c.url === "/api/vault/auth/register");
-  assert.ok(register, "se debe llamar a /auth/register");
+  const register = calls.find((c) => c.url === "/api/vault?op=auth.register");
+  assert.ok(register, "se debe llamar a op=auth.register");
   const body = JSON.parse(register!.init.body);
   assert.equal(body.username, "alice");
   assert.equal(body.password, "secret");
@@ -93,11 +93,11 @@ test("C2. Token existente válido: se reutiliza sin volver a hacer login", async
   let sessionChecks = 0;
   let loginCalls = 0;
   installFetch((url: string) => {
-    if (url === "/api/vault/session") {
+    if (url === "/api/vault?op=session") {
       sessionChecks++;
       return jsonResponse(200, { ok: true });
     }
-    if (url === "/api/vault/auth/login") {
+    if (url === "/api/vault?op=auth.login") {
       loginCalls++;
       return jsonResponse(200, { token: "tok-new" });
     }
@@ -138,7 +138,7 @@ test("C4. vaultUploadFile envía bytes Base64, trazabilidad y token Bearer; devu
     propertyId: "p_1",
   });
   assert.equal(meta.id, "file_1");
-  assert.equal(captured!.url, "/api/vault/files");
+  assert.equal(captured!.url, "/api/vault?op=files.upload");
   assert.equal(captured!.init.method, "POST");
   assert.equal(captured!.init.headers.authorization, "Bearer tok-u");
   const body = JSON.parse(captured!.init.body);
@@ -186,7 +186,7 @@ test("C7. flushQueuedReceiptsToVault externaliza solo los comprobantes en cola l
   storeVaultToken("alice", "tok-u");
   let uploads = 0;
   installFetch((url: string) => {
-    assert.equal(url, "/api/vault/files");
+    assert.equal(url, "/api/vault?op=files.upload");
     uploads++;
     return jsonResponse(200, {
       file: { id: `file_${uploads}`, name: "c.jpg", contentType: "image/jpeg", size: 3, sha256: "s" },
