@@ -70,6 +70,8 @@ cuando hay sesión del almacén remoto.
 | Aislamiento estricto por cuenta y cartera | ✅ | `entities.test.ts` E4, `patrimonialIntegration.test.ts` I5, `persistenceBlob.test.ts` P2, `routingCompatibility.test.ts` R4 |
 | Autorización en el servidor en todas las operaciones | ✅ | Todas las rutas de datos exigen Bearer; `requireAuth` + usuario del token como raíz de todas las rutas |
 | Protección frente a identificadores manipulados | ✅ | `safeSegment` en servidor; `entities.test.ts` E5, `patrimonialIntegration.test.ts` I6, `routingCompatibility.test.ts` R5 |
+| Sesiones caducadas o inválidas rechazadas | ✅ | Tokens HMAC con caducidad verificada en el servidor (`SESSION_TTL_MS`, `verifySessionToken`); `vault.test.ts` S2 (token caducado → rechazado), `vaultClient.test.ts` C6 (401 → «sesión caducada») |
+| Subidas con límite de tamaño, tipos permitidos e integridad | ✅ | Tipos acotados (PDF, imágenes, `.doc`) en `vaultContentTypeProblem`, máximo 10 MiB, firma de subida directa de un solo pathname con caducidad corta; SHA-256 recalculado por el servidor (`persistenceBlob.test.ts` P3/P4, `vault.test.ts`) |
 | Integridad SHA-256 de los documentos | ✅ | Verificada al subir, al confirmar subida directa y al descargar (502 si el objeto no coincide); `persistenceBlob.test.ts` P3/P4 |
 | Reintentos idempotentes sin duplicados | ✅ | `entities.test.ts` E2, `patrimonialIntegration.test.ts` I4, `portfolioRemote.test.ts` PR3, `vault.test.ts` |
 | Ausencia de fallback local silencioso | ✅ | Con sesión remota no hay escritura local como sustituto; sin almacén: 503 explícito (`patrimonialIntegration.test.ts` I7/I7b, `persistenceBlob.test.ts` P5/P6/P8) |
@@ -100,12 +102,22 @@ Ningún resultado de un nivel se atribuye a otro.
 
 ## 7. Importación de datos descargados (Fase 6)
 
+### Inventario de archivos y formatos admitidos
+
+| Entrada | Formato | Validación previa | Destino |
+| --- | --- | --- | --- |
+| Movimientos históricos (ingresos/gastos) | JSON (`PropertyExpense[]` con `id`, `propertyId`, `category`, `amount`, `date`, `type`) — salidas descargadas de la app y copias de seguridad `backups/<id>.json` | Esquema, fechas normalizadas, ids presentes; los inválidos se rechazan con motivo en el informe | Entidad/movimientos remotos por id, sin duplicar |
+| Copias de seguridad completas del vault | JSON del esquema versionado de backup (`backups/<id>.json`) | Lectura autenticada, SHA de contenido, recuentos | Restauración/merge con vista previa |
+| Justificantes y documentos (binarios) | PDF, imágenes (`image/*`) y `.doc` de contratos — espejo de `storage.rules` (`vaultContentTypeProblem`) | Tipo admitido, tamaño máximo (10 MiB), SHA-256 verificado a entrada y salida | Blob privado `files/<id>` + metadatos con `movementId`/`propertyId` |
+| Referencias legadas de adjuntos | Storage de Firebase y data URLs base64 | `recoveryImport` las clasifica en recuperables/no verificables; nunca se importa a medias | Externalización con referencia estable por hash |
+
 Procedimiento probado con conjunto pequeño (F1–F5 en `server/vault/importProcedure.test.ts` +
 `src/lib/recoveryImport.test.ts`): validación de archivos (un adjunto ilegible rechaza con motivo,
 sin importar a medias), conservación de identificadores y relaciones, detección de duplicados
 (reimportar no duplica ni mueve recuentos), informe de registros rechazados y ambigüedades
 (`planRecoveryMerge`, con revisión ANTES de confirmar en `RecoveryPreviewPanel`), recuentos
-antes/después y asociación de documentos (externalización con referencia estable por hash). La
+antes/después y asociación de documentos (externalización con referencia estable por hash), y
+recuperación desde una sesión nueva tras reiniciar el servicio (I2/I3). La
 importación masiva en producción queda pendiente de la decisión del propietario.
 
 ## 8. Verificación contra despliegues reales y bypass del SSO (mecanismo autorizado)
